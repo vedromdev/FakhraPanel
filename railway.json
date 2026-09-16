@@ -1,0 +1,19 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "dockerfilePath": "Dockerfile",
+    "buildCommand": "echo 'build handled in Dockerfile'"
+  },
+  "deploy": {
+    "startCommand": "node backend/src/index.js",
+    "numReplicas": 1,
+    "restartPolicy": { "type": "on-failure" },
+    "healthcheckPath": "/api/stats"
+  },
+  "variables": {
+    "NODE_ENV": "production",
+    "PORT": "3000",
+    "ADMIN_USER": "admin",
+    "ADMIN_PASS": "change-me-on-railway"
+  }
+}
