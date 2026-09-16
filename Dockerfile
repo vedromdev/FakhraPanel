@@ -4,7 +4,6 @@ WORKDIR /app
 COPY backend/package*.json backend/
 RUN npm ci --omit=dev
 COPY backend/src/ backend/src/
-COPY backend/prisma/ backend/prisma/
 
 # Frontend production build, served by the panel
 FROM node:20-alpine AS frontend
