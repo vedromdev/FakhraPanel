@@ -1,9 +1,0 @@
-# Agent runtime — deploy on each VPN node (Railway region service or VPS).
-# Requires xray-core and wireguard-tools on VPS nodes; Railway nodes use ws-only.
-FROM node:20-alpine AS agent
-WORKDIR /app
-COPY backend/agent.js backend/package.json ./
-RUN npm ci --omit=dev
-# For VPS nodes, you'd add: apk add --no-cache xray wireguard-tools
-EXPOSE 443
-CMD ["node", "agent.js"]
