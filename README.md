@@ -1,398 +1,206 @@
-# Fakhra Panel
+[English](/README.md) | [فارسی](/README.fa_IR.md) | [العربية](/README.ar_EG.md) | [中文](/README.zh_CN.md) | [Español](/README.es_ES.md) | [Русский](/README.ru_RU.md) | [Türkçe](/README.tr_TR.md)
 
-**Fakhra Panel** is a Railway-ready VPN control panel. The package name is `azadi-panel`, while the visible app name is **Fakhra Panel**.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./media/3x-ui-dark.png">
+    <img alt="3x-ui" src="./media/3x-ui-light.png">
+  </picture>
+</p>
 
-The panel is designed as a **control plane**:
+<p align="center">
+  <a href="https://github.com/MHSanaei/3x-ui/releases"><img src="https://img.shields.io/github/v/release/mhsanaei/3x-ui" alt="Release"></a>
+  <a href="https://github.com/MHSanaei/3x-ui/actions"><img src="https://img.shields.io/github/actions/workflow/status/mhsanaei/3x-ui/release.yml.svg" alt="Build"></a>
+  <a href="#"><img src="https://img.shields.io/github/go-mod/go-version/mhsanaei/3x-ui.svg" alt="GO Version"></a>
+  <a href="https://github.com/MHSanaei/3x-ui/releases/latest"><img src="https://img.shields.io/github/downloads/mhsanaei/3x-ui/total.svg" alt="Downloads"></a>
+  <a href="https://www.gnu.org/licenses/gpl-3.0.en.html"><img src="https://img.shields.io/badge/license-GPL%20V3-blue.svg?longCache=true" alt="License"></a>
+  <a href="https://pkg.go.dev/github.com/mhsanaei/3x-ui/v3"><img src="https://pkg.go.dev/badge/github.com/mhsanaei/3x-ui/v3.svg" alt="Go Reference"></a>
+</p>
 
-- Railway runs the web dashboard, API, health check, clients, nodes, routes, and subscription/config generation.
-- Your real VPN servers run on VPS/edge nodes.
-- The panel connects those nodes into one multi-location dashboard.
+**3X-UI** is an advanced, open-source web control panel for managing [Xray-core](https://github.com/XTLS/Xray-core) servers. It provides a clean, multi-language interface for deploying, configuring, and monitoring a wide range of proxy and VPN protocols — from a single VPS to multi-node deployments.
 
-> Important: Railway is great for the panel. It is usually not the right place to run raw VPN protocol daemons directly because many VPN protocols need UDP, custom ports, tun/tap, or system-level networking.
+Built as an enhanced fork of the original X-UI project, 3X-UI adds broader protocol support, improved stability, per-client traffic accounting, and many quality-of-life features.
+
+> [!IMPORTANT]
+> This project is intended for personal use only. Please do not use it for illegal purposes or in a production environment.
 
 ## Features
 
-- Railway deploy support with `npm start`.
-- Automatic Railway port support through `process.env.PORT`.
-- Local fallback port: `3000`.
-- Health endpoint: `/api/health`.
-- Clean tabbed dashboard UI.
-- Icons, protocol badges, animated overview, custom cursor, responsive layout.
-- Node registry for multi-location setups.
-- Client profiles with generated UUIDs.
-- Subscription endpoint for clients.
-- Protocol profiles for:
-  - VLESS
-  - VMess / V2Ray
-  - Hysteria 2
-  - Trojan
-  - Shadowsocks
-  - WireGuard
-  - TUIC
-  - NaiveProxy
-  - AnyTLS
-- Xray Core config generation for:
-  - VLESS
-  - VMess
-  - Trojan
-  - Shadowsocks
-- Copyable Xray Core install/bootstrap script for VPS nodes.
-- API token protection for node registration and protected config generation.
+- **Multi-protocol inbounds** — VLESS, VMess, Trojan, Shadowsocks, WireGuard, Hysteria2, HTTP, SOCKS (Mixed), Dokodemo-door / Tunnel, and TUN.
+- **Modern transports & security** — TCP (Raw), mKCP, WebSocket, gRPC, HTTPUpgrade, and XHTTP, secured with TLS, XTLS, and REALITY.
+- **Fallbacks** — serve multiple protocols on a single port (e.g. VLESS and Trojan on 443) using Xray's fallback support.
+- **Per-client management** — traffic quotas, expiry dates, IP limits, live online status, and one-click share links, QR codes, and subscriptions.
+- **Traffic statistics** — per inbound, per client, and per outbound, with reset controls.
+- **Multi-node support** — manage and scale across multiple servers from a single panel.
+- **Outbound & routing** — WARP, NordVPN, custom routing rules, load balancers, and outbound proxy chaining.
+- **Built-in subscription server** with multiple output formats and [custom page templates](docs/custom-subscription-templates.md).
+- **Telegram bot** for remote monitoring and management.
+- **RESTful API** with in-panel Swagger documentation.
+- **Flexible storage** — SQLite (default) or PostgreSQL.
+- **13 UI languages** with dark and light themes.
+- **Fail2ban integration** for enforcing per-client IP limits.
 
-## Requirements
+## Screenshots
 
-You need:
+<details>
+<summary>Click to expand</summary>
 
-- Node.js 18 or newer
-- npm
-- A Railway account
-- A GitHub account
-- Optional but recommended: one or more VPS servers for real VPN nodes
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./media/01-overview-dark.png">
+  <img alt="Overview" src="./media/01-overview-light.png">
+</picture>
 
-No npm packages are required. This project uses Node.js built-in modules only.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./media/02-add-inbound-dark.png">
+  <img alt="Inbounds" src="./media/02-add-inbound-light.png">
+</picture>
 
-## Project Structure
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./media/03-add-client-dark.png">
+  <img alt="Add client" src="./media/03-add-client-light.png">
+</picture>
 
-```text
-.
-├── server.js
-├── package.json
-├── railway.json
-├── README.md
-├── data
-│   ├── .gitkeep
-│   └── state.json
-└── public
-    ├── index.html
-    ├── styles.css
-    └── app.js
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./media/05-add-nodes-dark.png">
+  <img alt="Configs" src="./media/05-add-nodes-light.png">
+</picture>
 
-## Run Locally
+</details>
 
-Open a terminal:
+## Quick Start
 
 ```bash
-cd /Users/arshanabdollahi/Desktop/Azadi-Panel
-npm start
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
 ```
 
-Open:
-
-```text
-http://localhost:3000
-```
-
-Default login:
-
-```text
-Username: admin
-Password: azadi-admin
-```
-
-If port `3000` is already busy, run on another port:
+To install a specific version, append its tag (e.g. `v3.4.0`):
 
 ```bash
-PORT=3107 npm start
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) v3.4.0
 ```
 
-Then open:
+To install the rolling **dev** build (latest per-commit pre-release from `main`, not a stable release), pass `dev-latest`:
 
-```text
-http://localhost:3107
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) dev-latest
+```
+
+During installation a random username, password, and access path are generated. After installation, run `x-ui` to open the management menu, where you can start/stop the service, view or reset your login credentials, manage SSL certificates, and more.
+
+For full documentation, please visit the [project Wiki](https://github.com/MHSanaei/3x-ui/wiki).
+
+### Unattended install
+
+The installer also runs **non-interactively** for cloud-init.
+Set `XUI_NONINTERACTIVE=1` (or pipe with no TTY) and it installs end-to-end with
+zero prompts, generating random credentials and writing them to
+`/etc/x-ui/install-result.env`. See [`deploy/`](deploy/) for:
+
+- [Cloud-init user-data](deploy/cloud-init/) — unattended install on any cloud (Hetzner/AWS/DO/Vultr/GCP/Azure/Oracle)
+- [Hetzner Cloud notes](deploy/marketplace/hetzner/) — cloud-init deployment on Hetzner
+
+## Supported Platforms
+
+**Operating systems:** Ubuntu, Debian, Armbian, Fedora, CentOS, RHEL, AlmaLinux, Rocky Linux, Oracle Linux, Amazon Linux, Virtuozzo, Arch, Manjaro, Parch, openSUSE (Tumbleweed / Leap), Alpine, and Windows.
+
+**Architectures:** `amd64` · `386` · `arm64` (aarch64) · `armv7` · `armv6` · `armv5` · `s390x`.
+
+## Database Options
+
+3X-UI supports two backends, chosen during the install:
+
+- **SQLite** (default) — a single file at `/etc/x-ui/x-ui.db`. Zero setup, ideal for small and medium deployments.
+- **PostgreSQL** — recommended for high client counts or multi-node setups. The installer can install PostgreSQL locally for you, or accept a DSN to an existing server.
+
+At runtime the backend is selected via environment variables (the installer writes these to `/etc/default/x-ui` for you):
+
+```
+XUI_DB_TYPE=postgres
+XUI_DB_DSN=postgres://xui:password@127.0.0.1:5432/xui?sslmode=disable
+```
+
+### Migrating an existing SQLite install to PostgreSQL
+
+```bash
+x-ui migrate-db --dsn "postgres://xui:password@127.0.0.1:5432/xui?sslmode=disable"
+# then set XUI_DB_TYPE and XUI_DB_DSN in /etc/default/x-ui and restart:
+systemctl restart x-ui
+```
+
+The source SQLite file is left untouched; remove it manually once you have verified the new backend.
+
+### Docker
+
+The default `docker compose up -d` keeps using SQLite. To run with the bundled PostgreSQL service, uncomment the two `XUI_DB_*` env lines in `docker-compose.yml` and start with the profile:
+
+```bash
+docker compose --profile postgres up -d
+```
+
+The image bundles Fail2ban (enabled by default) to enforce per-client **IP limits**. Fail2ban bans offenders with `iptables`, which requires the `NET_ADMIN` capability. `docker-compose.yml` already grants it via `cap_add`; if you start the container with `docker run` instead, add the capabilities yourself, otherwise bans are logged but never applied:
+
+```bash
+docker run -d --cap-add=NET_ADMIN --cap-add=NET_RAW ... ghcr.io/mhsanaei/3x-ui
 ```
 
 ## Environment Variables
 
-Set these in Railway:
-
-```env
-PANEL_USER=admin
-PANEL_PASSWORD=change-this-password
-PANEL_TOKEN=change-this-long-random-token
-```
-
-What they do:
-
-| Variable | Purpose |
-| --- | --- |
-| `PANEL_USER` | Admin username for the web panel |
-| `PANEL_PASSWORD` | Admin password for the web panel |
-| `PANEL_TOKEN` | Bearer token used by nodes and protected config endpoints |
-| `PORT` | Automatically provided by Railway. Do not set this manually unless running locally. |
-
-## Railway Deployment
-
-### 1. Push to GitHub
-
-From the project folder:
-
-```bash
-git init
-git add .
-git commit -m "Initial Fakhra Panel"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git push -u origin main
-```
-
-### 2. Create a Railway Project
-
-Go to:
-
-```text
-https://railway.app
-```
-
-Then:
-
-```text
-New Project -> Deploy from GitHub repo
-```
-
-Select your Fakhra Panel repository.
-
-### 3. Confirm Railway Settings
-
-Railway should use:
-
-```text
-Start command: npm start
-Health check: /api/health
-```
-
-These are also included in `railway.json`.
-
-### 4. Add Variables
-
-In Railway:
-
-```text
-Service -> Variables
-```
-
-Add:
-
-```env
-PANEL_USER=admin
-PANEL_PASSWORD=your-strong-password
-PANEL_TOKEN=your-long-secret-token
-```
-
-### 5. Generate a Domain
-
-In Railway:
-
-```text
-Service -> Settings -> Networking -> Generate Domain
-```
-
-You will get a URL like:
-
-```text
-https://your-app.up.railway.app
-```
-
-Open it and log in with your panel username and password.
-
-## Ports
-
-For the panel:
-
-| Place | Port |
-| --- | --- |
-| Local default | `3000` |
-| Local custom | Example: `PORT=3107 npm start` |
-| Railway | Automatically assigned through `process.env.PORT` |
-
-Do **not** hard-code a port for Railway.
-
-For real VPN nodes, typical ports are:
-
-| Protocol | Recommended Port |
-| --- | --- |
-| VLESS | `443` |
-| VMess / V2Ray | `443` or `8443` |
-| Trojan | `443` |
-| Hysteria 2 | `443/UDP` |
-| Shadowsocks | `8388` |
-| WireGuard | `51820/UDP` |
-| TUIC | `443/UDP` |
-| NaiveProxy | `443` |
-| AnyTLS | `443` |
-
-## Register a Node
-
-Use this from a VPS or server that you want to add as a node:
-
-```bash
-curl -X POST https://YOUR-RAILWAY-DOMAIN/api/nodes/register \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PANEL_TOKEN" \
-  -d '{
-    "name": "Germany Edge 1",
-    "location": "Frankfurt",
-    "region": "eu-central",
-    "host": "de.example.com",
-    "protocols": ["vless", "vmess", "trojan", "shadowsocks", "hysteria2"],
-    "ports": {
-      "vless": 443,
-      "vmess": 8443,
-      "trojan": 443,
-      "shadowsocks": 8388,
-      "hysteria2": 443
-    },
-    "status": "online",
-    "xrayVersion": "latest"
-  }'
-```
-
-Replace:
-
-- `YOUR-RAILWAY-DOMAIN` with your Railway app URL.
-- `YOUR_PANEL_TOKEN` with your Railway `PANEL_TOKEN`.
-- `host` with your node server domain or IP.
-
-## Xray Core Setup
-
-Fakhra Panel can generate Xray Core configs for:
-
-- VLESS
-- VMess
-- Trojan
-- Shadowsocks
-
-### Option A: Use the Dashboard
-
-1. Open the panel.
-2. Log in.
-3. Go to the **Xray Core** tab.
-4. Select a node.
-5. Select a client.
-6. Copy `config.json` or the install script.
-
-### Option B: Download Config by API
-
-Get a full response with metadata:
-
-```bash
-curl https://YOUR-RAILWAY-DOMAIN/api/xray/config \
-  -H "Authorization: Bearer YOUR_PANEL_TOKEN"
-```
-
-Get raw `config.json` only:
-
-```bash
-curl "https://YOUR-RAILWAY-DOMAIN/api/xray/config?raw=1" \
-  -H "Authorization: Bearer YOUR_PANEL_TOKEN" \
-  -o config.json
-```
-
-### Option C: Use the Install Script
-
-On your VPS:
-
-```bash
-export PANEL_URL="https://YOUR-RAILWAY-DOMAIN"
-export PANEL_TOKEN="YOUR_PANEL_TOKEN"
-```
-
-Then copy the install script from the **Xray Core** tab and run it as root.
-
-The script will:
-
-1. Install required packages.
-2. Install Xray Core.
-3. Download the generated Xray config from your panel.
-4. Enable and restart the `xray` service.
-
-## Client Subscription Links
-
-Each client has a subscription URL:
-
-```text
-https://YOUR-RAILWAY-DOMAIN/sub/CLIENT_ID
-```
-
-In the dashboard:
-
-1. Go to **Clients**.
-2. Click **Sub**.
-3. Paste the copied subscription URL into a compatible VPN client.
-
-## API Endpoints
-
-| Method | Endpoint | Purpose |
+| Variable | Description | Default |
 | --- | --- | --- |
-| `GET` | `/api/health` | Health check for Railway |
-| `GET` | `/api/bootstrap` | Panel bootstrap data |
-| `POST` | `/api/login` | Login and get a session token |
-| `GET` | `/api/protocols` | Supported protocols |
-| `GET` | `/api/nodes` | List nodes |
-| `POST` | `/api/nodes` | Add node |
-| `POST` | `/api/nodes/register` | Register/update node |
-| `GET` | `/api/clients` | List clients |
-| `POST` | `/api/clients` | Create client |
-| `GET` | `/api/routes` | Route preview |
-| `POST` | `/api/routes` | Create route |
-| `GET` | `/api/xray/templates` | Xray support info |
-| `GET` | `/api/xray/config` | Generate Xray config |
-| `GET` | `/api/xray/config?raw=1` | Generate raw Xray config |
-| `GET` | `/api/xray/install-script` | Generate VPS install script |
-| `GET` | `/sub/:clientId` | Client subscription |
+| `XUI_DB_TYPE` | Database backend: `sqlite` or `postgres` | `sqlite` |
+| `XUI_DB_DSN` | PostgreSQL connection string (when `XUI_DB_TYPE=postgres`) | — |
+| `XUI_DB_FOLDER` | Directory for the SQLite database file | `/etc/x-ui` |
+| `XUI_DB_MAX_OPEN_CONNS` | Maximum open connections (PostgreSQL pool) | — |
+| `XUI_DB_MAX_IDLE_CONNS` | Maximum idle connections (PostgreSQL pool) | — |
+| `XUI_INIT_WEB_BASE_PATH` | The initial URI path for the web panel | `/` |
+| `XUI_ENABLE_FAIL2BAN` | Enable Fail2ban-based IP-limit enforcement | `true` |
+| `XUI_LOG_LEVEL` | Log verbosity (`debug`, `info`, `warning`, `error`) | `info` |
+| `XUI_DEBUG` | Enable debug mode | `false` |
+| `XUI_TUNNEL_HEALTH_MONITOR` | Enable the tunnel health monitor (probes a URL and restarts xray after repeated failures; a restart drops all clients) | `false` |
+| `XUI_TUNNEL_HEALTH_PROXY` | Proxy the probe is sent through; point it at a local xray inbound so the probe tests the tunnel (e.g. `socks5://127.0.0.1:1080`). Empty means the probe only checks host connectivity | — |
+| `XUI_TUNNEL_HEALTH_URL` | URL probed for tunnel health | `https://www.cloudflare.com/cdn-cgi/trace` |
+| `XUI_TUNNEL_HEALTH_INTERVAL` | Interval between probes | `30s` |
+| `XUI_TUNNEL_HEALTH_TIMEOUT` | Per-probe timeout | `10s` |
+| `XUI_TUNNEL_HEALTH_FAILURES` | Consecutive failures before a restart is triggered | `3` |
+| `XUI_TUNNEL_HEALTH_COOLDOWN` | Minimum delay between consecutive restarts | `5m` |
 
-## Security Notes
+## Supported Languages
 
-Before using this for real traffic:
+The panel UI is available in 13 languages:
 
-1. Change the default panel password.
-2. Use a long random `PANEL_TOKEN`.
-3. Keep your Railway variables secret.
-4. Use HTTPS domains for panel and nodes.
-5. Put TLS/reverse proxy configuration in front of Xray WebSocket inbounds.
-6. Use a persistent database or volume if you need long-term production storage.
-7. Rotate any token that is accidentally shared.
+English · فارسی · العربية · 中文（简体） · 中文（繁體） · Español · Русский · Українська · Türkçe · Tiếng Việt · 日本語 · Bahasa Indonesia · Português (Brasil)
 
-## Troubleshooting
+## Contributing
 
-### `npm error Missing script: "start"`
+Contributions are welcome. Please read the [Contributing Guide](/CONTRIBUTING.md) before opening an issue or pull request.
 
-You are probably in the wrong folder. Run:
+## A Special Thanks to
 
-```bash
-cd /Users/arshanabdollahi/Desktop/Azadi-Panel
-npm run
-```
+- [alireza0](https://github.com/alireza0/)
 
-You should see:
+## Acknowledgment
 
-```text
-start
-  node server.js
-```
+- [Iran v2ray rules](https://github.com/chocolate4u/Iran-v2ray-rules) (License: **GPL-3.0**): _Enhanced v2ray/xray and v2ray/xray-clients routing rules with built-in Iranian domains and a focus on security and adblocking._
+- [Russia v2ray rules](https://github.com/runetfreedom/russia-v2ray-rules-dat) (License: **GPL-3.0**): _This repository contains automatically updated V2Ray routing rules based on data on blocked domains and addresses in Russia._
 
-### Port 3000 is busy
+## Community Tools
 
-Run:
+Tools and integrations built by the community around 3x-ui.
 
-```bash
-PORT=3107 npm start
-```
+- [terraform-provider-3x-ui](https://github.com/batonogov/terraform-provider-threexui) (License: **MIT**): _Manage inbounds, clients, panel settings, and Xray configuration as code with Terraform / OpenTofu._
 
-### Railway deploy fails
+## Support project
 
-Check:
+**If this project is helpful to you, you may wish to give it a**:star2:
 
-- `package.json` exists.
-- `package.json` has `"start": "node server.js"`.
-- Railway variables are set.
-- Health check path is `/api/health`.
+<a href="https://www.buymeacoffee.com/MHSanaei" target="_blank">
+<img src="./media/default-yellow.png" alt="Buy Me A Coffee" style="height: 70px !important;width: 277px !important;" >
+</a>
 
-### Xray script cannot download config
+</br>
+<a href="https://nowpayments.io/donation/hsanaei" target="_blank" rel="noreferrer noopener">
+   <img src="./media/donation-button-black.svg" alt="Crypto donation button by NOWPayments">
+</a>
 
-Check:
+## Stargazers over Time
 
-- `PANEL_URL` is set on the VPS.
-- `PANEL_TOKEN` matches Railway.
-- The node exists in the panel.
-- The panel URL is reachable from the VPS.
+[![Stargazers over time](https://starchart.cc/MHSanaei/3x-ui.svg?variant=adaptive)](https://starchart.cc/MHSanaei/3x-ui)
