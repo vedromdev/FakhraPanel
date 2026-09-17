@@ -1,158 +1,87 @@
-# Azadi Panel
+# Fakhra Panel
 
-A multi-protocol VPN management panel — control plane deployed on Railway, with agents on each VPN server (Railway region or any VPS) forming a unified mesh.
+Fakhra Panel is a fresh, Railway-ready Node.js VPN control panel project. The package name is `azadi-panel`, while the visible product name in the UI is **Fakhra Panel**.
+
+It is designed as a control plane: Railway hosts the web panel, API, health endpoint, node registry, client profiles, and generated subscription/config links. Your actual VPN protocol servers should run on VPS or edge nodes that support the required protocols, then register in the panel as nodes.
 
 ## Features
 
-| # | Feature | Status |
-|---|---------|--------|
-| 1 | Multiple VPN types | ✅ VLESS, VMess, Hysteria2, Shadowsocks, Trojan, TUIC, WireGuard |
-| 2 | VLESS / V2Ray / Hysteria | ✅ Primary protocols, Reality + Vision flow |
-| 3 | Railway deployment | ✅ Panel on Railway + Railway region nodes |
-| 4 | Modern animated UI | ✅ Tailwind + Framer Motion + aurora bg |
-| 5 | Project location | ✅ `/Desktop/Azadi-Panel` |
-| 6 | Animations & cursor | ✅ Custom animated cursor + sparks, typewriter, aurora, glass cards |
-| 7 | Name: azadi-panel | ✅ |
-| 8 | Multi-location mesh | ✅ Agents connect via outbound WSS → panel pushes mesh configs |
+- Railway compatible with `npm start` and `/api/health`.
+- No required npm dependencies.
+- Protocol templates for VLESS, VMess/V2Ray, Hysteria 2, Trojan, Shadowsocks, WireGuard, TUIC, NaiveProxy, and AnyTLS.
+- Multi-location node grouping and automatic route preview.
+- Node compatibility model for connecting multiple server locations into one panel.
+- Client profile creation with generated UUIDs and subscription links.
+- API token protection for write operations.
+- Animated dashboard UI with custom cursor, moving background, live metrics, and responsive layout.
 
-## Architecture
-
-```
-                    ┌──────────────────────────────────────────┐
-                    │     AZADI PANEL (Railway service #1)     │
-                    │   Fastify API + React SPA + SQLite DB     │
-                    │   /api · /agent/control (WSS) · /sub      │
-                    └─────────────┬──────┬──────┬───────────────┘
-                                  │      │      │  outbound control-channel (WSS over HTTPS edge)
-                   ┌──────────────┘      │      └──────────────┐
-                   ▼                     ▼                     ▼
-       ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-       │ AGENT — Railway  │  │ AGENT — Railway  │  │ AGENT — Any VPS  │
-       │ us-east region   │  │ eu-west region   │  │ Tokyo / Frankfurt│
-       │ xray ws-only     │  │ xray ws-only     │  │ xray+hy2+wg+ss   │
-       │ (edge forwards  │  │ (edge forwards  │  │ (full ports)     │
-       │  only HTTP/WS)  │  │  only HTTP/WS)  │  │                  │
-       └──────────────────┘  └──────────────────┘  └────────┬───────┘
-                                                             │ WireGuard mesh 10.77.x.0/24
-                                                             └────────┬────────┘
-                                                                      │
-                                                        Traffic chains: any→any node
-```
-
-**Why this works on Railway:** Railway's edge only forwards HTTP/WebSocket (and terminates TLS at the edge) — it cannot bind raw TCP/UDP/QUIC ports. The panel and agents run as *separate Railway services*, and each agent maintains an **outbound** WebSocket control channel to the panel. So even though Railway blocks inbound UDP/QUIC:
-
-- ✅ VLESS / VMess / Trojan over WS+TLS — works on Railway (edge forwards WebSocket)
-- 🟡 Hysteria2 / TUIC / raw-VLESS-Reality — only on **VPS** nodes (need raw UDP/QUIC)
-- ✅ ShadowSocks + WireGuard mesh — works on VPS or via relayed ports on Railway
-- ✅ **Multi-location mesh** — every location is a node; WireGuard (10.77.x.0/24) stitches them into one network, and the panel pushes configs so traffic can chain: client → node A → node B
-
-The agent (`backend/agent.js`) is a lightweight Node.js process. It connects **outbound** to the panel over WebSocket, receives its xray/hysteria2/wireguard config automatically, and reports real-time stats. Add a new Railway region service or a VPS in any country → it appears live in the panel instantly.
-
-## Quick Start (local)
+## Run locally
 
 ```bash
-# 1. Start the panel
-cd backend
-export ADMIN_PASS=admin123
-export AGENT_SHARED_SECRET=dev-secret
-export DB_PATH=./data/azadi.db
-node src/index.js
-
-# 2. Open http://localhost:3000 → login: admin / admin123
-
-# 3. (Optional) Start a local agent pointed at the panel
-export AZADI_PANEL=http://localhost:3000
-export AZADI_SECRET=dev-secret
-node ../agent.js
+npm start
 ```
 
-## Deploy to Railway
+Open `http://localhost:3000`.
+
+Default login:
+
+- Username: `admin`
+- Password: `azadi-admin`
+
+Change these in Railway variables:
+
+- `PANEL_USER`
+- `PANEL_PASSWORD`
+- `PANEL_TOKEN`
+
+## Railway deploy
+
+1. Push this project to a Git repository.
+2. Create a Railway project from the repository.
+3. Add environment variables:
+   - `PANEL_USER`
+   - `PANEL_PASSWORD`
+   - `PANEL_TOKEN`
+4. Deploy.
+5. Railway will run `npm start` and check `/api/health`.
+
+## Important architecture note
+
+Railway is excellent for the web panel, API, and orchestration layer. Most VPN protocols need raw networking, UDP, tun/tap, custom ports, or long-running native services. Those protocol daemons should run on your own nodes. Fakhra Panel tracks those nodes, groups them by location, generates links/configs, and exposes a node registration API for multi-location management.
+
+## Node registration
+
+Register a node from any server:
 
 ```bash
-railway login
-railway init
-railway variables set ADMIN_USER=admin ADMIN_PASS=<secret> \
-  AGENT_SHARED_SECRET=<shared-across-nodes> DB_PATH=./data/azadi.db
-railway up
+curl -X POST https://YOUR-RAILWAY-DOMAIN/api/nodes/register \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_PANEL_TOKEN" \
+  -d '{
+    "name": "Germany Edge 1",
+    "location": "Frankfurt",
+    "region": "eu-central",
+    "host": "de.example.com",
+    "protocols": ["vless", "hysteria2", "vmess"],
+    "ports": { "vless": 443, "hysteria2": 443, "vmess": 8443 },
+    "status": "online"
+  }'
 ```
 
-For multi-location: add a **new Railway service** (or deploy to a VPS in any country) with:
-- `AZADI_PANEL` → your panel's URL
-- `AZADI_SECRET` → the shared secret from the panel's `AGENT_SHARED_SECRET` setting
-- `NODE_NAME`, `FLAG`, `COUNTRY` (optional labels)
-- `RAILWAY_PUBLIC_DOMAIN` auto-set by Railway (marks this as a ws-only-capable node)
+## API highlights
 
-The panel auto-discovers all agents and meshes them into a single 10.77.x.0/24 network.
+- `GET /api/health`
+- `GET /api/bootstrap`
+- `POST /api/login`
+- `GET /api/nodes`
+- `POST /api/nodes`
+- `POST /api/nodes/register`
+- `GET /api/clients`
+- `POST /api/clients`
+- `GET /api/routes`
+- `POST /api/routes`
+- `GET /sub/:clientId`
 
-Full deployment guide: [DEPLOY.md](./DEPLOY.md)
+## Security
 
-## Project Structure
-
-```
-├─ backend/
-│  ├─ agent.js                 # Agent: runs on each VPN server, connects outbound to panel
-│  ├─ Dockerfile.agent         # Agent-only image for VPS/railway nodes
-│  ├─ package.json
-│  ├─ src/
-│  │  ├─ db.js                 # SQLite schema (nodes, users, assignments, traffic, sessions)
-│  │  ├─ index.js              # Panel API (Fastify): /api, /agent/control (WSS), /sub
-│  │  ├─ protocols.js          # VLESS/VMess/HY2/SS/Trojan/Tuic/WG config builder + links
-│  │  ├─ configgen.js          # xray/hysteria/wireguard-mesh config generators
-│  │  └─ services/
-│  │     └─ node-manager.js    # Agent connection registry + config push
-├── frontend/
-│  ├─ index.html
-│  ├─ vite.config.js
-│  ├─ tailwind.config.js
-│  ├─ postcss.config.js
-│  ├─ package.json
-│  └─ src/
-│     ├─ main.jsx              # React entry (Router + Query + Auth)
-│     ├─ App.jsx               # Route layout with auth guard
-│     ├─ index.css             # Aurora bg + dark glass theme
-│     ├─ components/
-│     │  ├─ Cursor.jsx          # Custom animated cursor w/ click sparks
-│     │  ├─ HeroTypewriter.jsx  # Animated gradient typewriter
-│     │  ├─ Sidebar.jsx
-│     │  ├─ ui.jsx              # Aurora, glass cards, modal, toast, stat cards
-│     ├─ contexts/AuthContext.jsx
-│     └─ pages/
-│        ├─ Login.jsx          # Animated login with gradient text
-│        ├─ Dashboard.jsx      # Live stats via dashboard WS + node status
-│        ├─ Nodes.jsx          # Add/deploy/delete nodes
-│        ├─ Users.jsx          # User mgmt + multi-location node assignment
-│        ├─ Protocols.jsx      # Protocol comparison table
-│        └─ Settings.jsx
-├─ Dockerfile                   # Multi-stage: frontend build → panel image
-├─ docker-compose.yml           # Local: panel + agent
-├─ railway.json                 # Railway config
-├─ DEPLOY.md
-├─ .env.agent.example
-└─ README.md
-```
-
-## API Endpoints
-
-### Auth & Control
-- `POST /api/login` — admin login, returns session token
-
-### Nodes (admin)
-- `GET /api/nodes` — list all registered agents
-- `POST /api/nodes` — register a node manually
-- `POST /api/nodes/:id/deploy` — push config to agent immediately
-- `PUT /api/nodes/:id` / `DELETE /api/nodes/:id`
-
-### Users (admin)
-- `GET /api/users` — list with usage stats
-- `POST /api/users` — create + assign to specific nodes (multi-location targeting)
-- `PUT /api/users/:id` — toggle/enabled/limits / reassign nodes
-
-### Client-facing
-- `GET /sub/:token` — subscription endpoint (base64 of all shareable links)
-
-### Agent
-- `WS /agent/control` — WebSocket control channel (agent connects outbound here)
-
-## License
-
-MIT
+This project starts with simple panel authentication and bearer-token API protection. Before putting real users on it, place it behind HTTPS, set strong environment secrets, add persistent managed storage, and connect real node-side provisioning scripts for the protocols you use.

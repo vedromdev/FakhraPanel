@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fakhra Panel</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="cursor" id="cursor"></div>
+    <div class="mesh"></div>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">F</div>
+          <div>
+            <strong>Fakhra Panel</strong>
+            <span>azadi-panel</span>
+          </div>
+        </div>
+        <nav>
+          <a href="#overview" class="active">Overview</a>
+          <a href="#nodes">Nodes</a>
+          <a href="#protocols">Protocols</a>
+          <a href="#clients">Clients</a>
+          <a href="#routes">Routes</a>
+        </nav>
+        <div class="railway-card">
+          <span>Railway ready</span>
+          <strong id="healthText">Checking...</strong>
+          <small>/api/health</small>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Private multi-location VPN control plane</p>
+            <h1>Fakhra Panel</h1>
+          </div>
+          <form class="login" id="loginForm">
+            <input id="username" autocomplete="username" placeholder="admin">
+            <input id="password" type="password" autocomplete="current-password" placeholder="password">
+            <button>Unlock</button>
+          </form>
+        </header>
+
+        <section id="overview" class="hero">
+          <div class="hero-copy">
+            <span class="pulse"></span>
+            <h2>One panel. Many locations. Clean protocol control.</h2>
+            <p>Register Railway-hosted and external nodes, group them by region, and generate client links for VLESS, V2Ray, Hysteria, and more.</p>
+          </div>
+          <div class="signal-map" aria-label="Animated node map">
+            <div class="node-dot dot-a"></div>
+            <div class="node-dot dot-b"></div>
+            <div class="node-dot dot-c"></div>
+            <div class="node-dot dot-d"></div>
+            <svg viewBox="0 0 500 260" role="img">
+              <path d="M72 162 C160 40, 302 72, 428 118" />
+              <path d="M84 184 C210 240, 320 220, 430 136" />
+              <path d="M120 80 C190 170, 260 180, 380 74" />
+            </svg>
+          </div>
+        </section>
+
+        <section class="metrics" id="metrics"></section>
+
+        <section class="grid two">
+          <article class="panel" id="nodes">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Node compatibility</p>
+                <h3>Multi-location nodes</h3>
+              </div>
+              <button id="addNode">Add demo node</button>
+            </div>
+            <div class="list" id="nodeList"></div>
+          </article>
+
+          <article class="panel" id="protocols">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">VPN types</p>
+                <h3>Protocol catalog</h3>
+              </div>
+            </div>
+            <div class="protocol-grid" id="protocolGrid"></div>
+          </article>
+        </section>
+
+        <section class="grid two">
+          <article class="panel" id="clients">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Access</p>
+                <h3>Clients</h3>
+              </div>
+              <button id="addClient">Create client</button>
+            </div>
+            <div class="list" id="clientList"></div>
+          </article>
+
+          <article class="panel" id="routes">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Smart pathing</p>
+                <h3>Route preview</h3>
+              </div>
+            </div>
+            <div class="list" id="routeList"></div>
+          </article>
+        </section>
+      </section>
+    </main>
+    <div class="toast" id="toast"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
