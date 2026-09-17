@@ -3,7 +3,7 @@
     "app": "Fakhra Panel",
     "package": "azadi-panel",
     "createdAt": "2026-09-16T17:10:34.406Z",
-    "updatedAt": "2026-09-16T17:10:34.411Z"
+    "updatedAt": "2026-09-17T06:26:49.756Z"
   },
   "settings": {
     "panelName": "Fakhra Panel",
@@ -124,5 +124,16 @@
       "createdAt": "2026-09-16T17:10:34.411Z"
     }
   ],
-  "sessions": []
+  "sessions": [
+    {
+      "token": "3e14a8ee9cec5fe274510bbe05debca77c030b3f6748aed5",
+      "username": "admin",
+      "createdAt": 1789626353338
+    },
+    {
+      "token": "1340bf73402375052da1b919ae0acd568788277b42a49740",
+      "username": "admin",
+      "createdAt": 1789626409756
+    }
+  ]
 }

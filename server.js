@@ -11,11 +11,11 @@ const DATA_FILE = path.join(__dirname, "data", "state.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 
 const protocolCatalog = [
-  { id: "vless", name: "VLESS", family: "Xray", transport: ["tcp", "ws", "grpc", "reality"], defaultPort: 443 },
-  { id: "vmess", name: "VMess / V2Ray", family: "V2Ray", transport: ["tcp", "ws", "grpc"], defaultPort: 443 },
+  { id: "vless", name: "VLESS", family: "Xray Core", transport: ["tcp", "ws", "grpc", "reality"], defaultPort: 443 },
+  { id: "vmess", name: "VMess / V2Ray", family: "Xray Core", transport: ["tcp", "ws", "grpc"], defaultPort: 443 },
   { id: "hysteria2", name: "Hysteria 2", family: "Hysteria", transport: ["udp", "quic"], defaultPort: 443 },
-  { id: "trojan", name: "Trojan", family: "Xray", transport: ["tcp", "ws", "grpc"], defaultPort: 443 },
-  { id: "shadowsocks", name: "Shadowsocks", family: "Proxy", transport: ["tcp", "udp"], defaultPort: 8388 },
+  { id: "trojan", name: "Trojan", family: "Xray Core", transport: ["tcp", "ws", "grpc"], defaultPort: 443 },
+  { id: "shadowsocks", name: "Shadowsocks", family: "Xray Core", transport: ["tcp", "udp"], defaultPort: 8388 },
   { id: "wireguard", name: "WireGuard", family: "Tunnel", transport: ["udp"], defaultPort: 51820 },
   { id: "tuic", name: "TUIC", family: "QUIC", transport: ["udp", "quic"], defaultPort: 443 },
   { id: "naiveproxy", name: "NaiveProxy", family: "HTTP/2", transport: ["https"], defaultPort: 443 },
@@ -216,6 +216,7 @@ function cleanNode(input) {
     host: String(input.host || "").slice(0, 160),
     status: ["online", "offline", "maintenance"].includes(input.status) ? input.status : "online",
     role: input.role || "edge",
+    xrayVersion: input.xrayVersion || "latest",
     protocols,
     ports: input.ports && typeof input.ports === "object" ? input.ports : {},
     weight: Number(input.weight || 1),
@@ -287,6 +288,116 @@ function routePreview(state) {
   });
 }
 
+function pickXrayProtocols(node) {
+  return (node.protocols || []).filter(protocol => ["vless", "vmess", "trojan", "shadowsocks"].includes(protocol));
+}
+
+function xrayInbound(protocol, node, client) {
+  const port = Number(node.ports?.[protocol] || protocolCatalog.find(item => item.id === protocol)?.defaultPort || 443);
+  const tag = `${protocol}-${node.region || "global"}`;
+  const streamSettings = {
+    network: "ws",
+    security: "none",
+    wsSettings: { path: `/${protocol}` }
+  };
+  if (protocol === "vless") {
+    return {
+      tag,
+      listen: "0.0.0.0",
+      port,
+      protocol: "vless",
+      settings: {
+        clients: [{ id: client.uuid, email: `${client.name.replace(/\s+/g, "-").toLowerCase()}@fakhra` }],
+        decryption: "none"
+      },
+      streamSettings,
+      sniffing: { enabled: true, destOverride: ["http", "tls", "quic"] }
+    };
+  }
+  if (protocol === "vmess") {
+    return {
+      tag,
+      listen: "0.0.0.0",
+      port,
+      protocol: "vmess",
+      settings: {
+        clients: [{ id: client.uuid, alterId: 0, email: `${client.name.replace(/\s+/g, "-").toLowerCase()}@fakhra` }]
+      },
+      streamSettings,
+      sniffing: { enabled: true, destOverride: ["http", "tls"] }
+    };
+  }
+  if (protocol === "trojan") {
+    return {
+      tag,
+      listen: "0.0.0.0",
+      port,
+      protocol: "trojan",
+      settings: {
+        clients: [{ password: client.uuid, email: `${client.name.replace(/\s+/g, "-").toLowerCase()}@fakhra` }]
+      },
+      streamSettings,
+      sniffing: { enabled: true, destOverride: ["http", "tls"] }
+    };
+  }
+  if (protocol === "shadowsocks") {
+    return {
+      tag,
+      listen: "0.0.0.0",
+      port,
+      protocol: "shadowsocks",
+      settings: {
+        method: "2022-blake3-aes-256-gcm",
+        password: crypto.createHash("sha256").update(client.uuid).digest("base64").slice(0, 44),
+        network: "tcp,udp"
+      }
+    };
+  }
+  return null;
+}
+
+function makeXrayConfig(node, client) {
+  const inbounds = pickXrayProtocols(node).map(protocol => xrayInbound(protocol, node, client)).filter(Boolean);
+  return {
+    log: { loglevel: "warning" },
+    api: { tag: "api", services: ["HandlerService", "LoggerService", "StatsService"] },
+    policy: { system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true } },
+    inbounds,
+    outbounds: [
+      { tag: "direct", protocol: "freedom" },
+      { tag: "blocked", protocol: "blackhole" }
+    ],
+    routing: {
+      domainStrategy: "IPIfNonMatch",
+      rules: [
+        { type: "field", ip: ["geoip:private"], outboundTag: "blocked" },
+        { type: "field", protocol: ["bittorrent"], outboundTag: "blocked" }
+      ]
+    },
+    stats: {}
+  };
+}
+
+function makeXrayInstallScript(node) {
+  const configUrl = `/api/xray/config?nodeId=${encodeURIComponent(node.id)}&raw=1`;
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "",
+    "# Fakhra Panel Xray Core node bootstrap",
+    "# Run this on the VPS/edge server, not on Railway.",
+    "if [ \"$(id -u)\" -ne 0 ]; then echo \"Run as root\"; exit 1; fi",
+    "apt-get update",
+    "apt-get install -y curl unzip ca-certificates",
+    "bash -c \"$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install",
+    "mkdir -p /usr/local/etc/xray",
+    `curl -fsSL "$PANEL_URL${configUrl}" -H "Authorization: Bearer $PANEL_TOKEN" -o /usr/local/etc/xray/config.json`,
+    "systemctl enable xray",
+    "systemctl restart xray",
+    "systemctl status xray --no-pager"
+  ].join("\n");
+}
+
 function contentType(filePath) {
   const ext = path.extname(filePath);
   return {
@@ -326,6 +437,31 @@ async function handleApi(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/protocols") {
     return sendJson(res, 200, protocolCatalog);
+  }
+  if (req.method === "GET" && url.pathname === "/api/xray/templates") {
+    return sendJson(res, 200, {
+      supported: ["vless", "vmess", "trojan", "shadowsocks"],
+      notes: [
+        "Xray Core should run on your VPS or edge node.",
+        "Railway should host the Fakhra Panel control plane.",
+        "Generated configs use WebSocket defaults so you can place TLS in front with Nginx, Caddy, or a CDN."
+      ]
+    });
+  }
+  if (req.method === "GET" && url.pathname === "/api/xray/config") {
+    if (!requireWriteAuth(req, res)) return;
+    const node = state.nodes.find(item => item.id === url.searchParams.get("nodeId")) || state.nodes.find(item => pickXrayProtocols(item).length);
+    const client = state.clients.find(item => item.id === url.searchParams.get("clientId") || item.uuid === url.searchParams.get("clientId")) || state.clients[0];
+    if (!node || !client) return sendJson(res, 404, { error: "Need at least one Xray-capable node and one client." });
+    const config = makeXrayConfig(node, client);
+    if (url.searchParams.get("raw") === "1") return sendJson(res, 200, config);
+    return sendJson(res, 200, { node: { id: node.id, name: node.name, host: node.host }, client: { id: client.id, name: client.name }, config });
+  }
+  if (req.method === "GET" && url.pathname === "/api/xray/install-script") {
+    if (!requireWriteAuth(req, res)) return;
+    const node = state.nodes.find(item => item.id === url.searchParams.get("nodeId")) || state.nodes.find(item => pickXrayProtocols(item).length);
+    if (!node) return send(res, 404, "Need at least one Xray-capable node.");
+    return send(res, 200, makeXrayInstallScript(node), { "Content-Type": "text/plain; charset=utf-8" });
   }
   if (req.method === "GET" && url.pathname === "/api/nodes") {
     return sendJson(res, 200, state.nodes);
