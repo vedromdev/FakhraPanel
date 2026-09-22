@@ -1,206 +1,603 @@
-[English](/README.md) | [فارسی](/README.fa_IR.md) | [العربية](/README.ar_EG.md) | [中文](/README.zh_CN.md) | [Español](/README.es_ES.md) | [Русский](/README.ru_RU.md) | [Türkçe](/README.tr_TR.md)
+<div dir="rtl">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./media/3x-ui-dark.png">
-    <img alt="3x-ui" src="./media/3x-ui-light.png">
-  </picture>
-</p>
+# 💬 فل‌فل‌چت
 
-<p align="center">
-  <a href="https://github.com/MHSanaei/3x-ui/releases"><img src="https://img.shields.io/github/v/release/mhsanaei/3x-ui" alt="Release"></a>
-  <a href="https://github.com/MHSanaei/3x-ui/actions"><img src="https://img.shields.io/github/actions/workflow/status/mhsanaei/3x-ui/release.yml.svg" alt="Build"></a>
-  <a href="#"><img src="https://img.shields.io/github/go-mod/go-version/mhsanaei/3x-ui.svg" alt="GO Version"></a>
-  <a href="https://github.com/MHSanaei/3x-ui/releases/latest"><img src="https://img.shields.io/github/downloads/mhsanaei/3x-ui/total.svg" alt="Downloads"></a>
-  <a href="https://www.gnu.org/licenses/gpl-3.0.en.html"><img src="https://img.shields.io/badge/license-GPL%20V3-blue.svg?longCache=true" alt="License"></a>
-  <a href="https://pkg.go.dev/github.com/mhsanaei/3x-ui/v3"><img src="https://pkg.go.dev/badge/github.com/mhsanaei/3x-ui/v3.svg" alt="Go Reference"></a>
-</p>
+**فل‌فل‌چت** یک پیام‌رسان بلادرنگ مدرن و امن است که با Next.js، Socket.IO و MongoDB ساخته شده. این پروژه برای استقرار روی سرور خودتان (self-hosted) طراحی شده و از ویژگی‌هایی مانند تماس صوتی، رمزنگاری، چندزبانگی و پنل مدیریت پیشرفته برخوردار است.
 
-**3X-UI** is an advanced, open-source web control panel for managing [Xray-core](https://github.com/XTLS/Xray-core) servers. It provides a clean, multi-language interface for deploying, configuring, and monitoring a wide range of proxy and VPN protocols — from a single VPS to multi-node deployments.
+---
 
-Built as an enhanced fork of the original X-UI project, 3X-UI adds broader protocol support, improved stability, per-client traffic accounting, and many quality-of-life features.
+## ✨ ویژگی‌ها
 
-> [!IMPORTANT]
-> This project is intended for personal use only. Please do not use it for illegal purposes or in a production environment.
+- **پیام‌رسانی بلادرنگ** — چت گروهی و خصوصی با Socket.IO
+- **تماس صوتی** — تماس یک‌به‌یک از طریق WebRTC
+- **رمزنگاری هوشمند** — پیام‌های حساس با `hushCrypto` رمزگذاری می‌شوند
+- **آپلود فایل** — ارسال تصویر، ویدیو، PDF و سایر فایل‌ها
+- **استیکر و GIF** — پشتیبانی از استیکر و GIF اختصاصی
+- **احراز هویت امن** — JWT در کوکی، هشینگ رمز عبور با bcrypt
+- **پنل مدیریت** — مدیریت کاربران، اتاق‌ها، تماس‌ها، پشتیبان‌گیری و ذخیره‌سازی
+- **چندزبانگی** — پشتیبانی از فارسی و انگلیسی (RTL/LTR)
+- **لاگ حسابرسی** — ثبت تمامی رویدادهای مهم سیستم
+- **پشتیبان‌گیری امن** — پشتیبان‌گیری قابل‌ تأیید با امضای رمزنگاری
+- **نرخ‌محدودی** — محافظت در برابر سوءاستفاده از API
+- **مانیتورینگ** — یکپارچه‌سازی با Sentry
 
-## Features
+---
 
-- **Multi-protocol inbounds** — VLESS, VMess, Trojan, Shadowsocks, WireGuard, Hysteria2, HTTP, SOCKS (Mixed), Dokodemo-door / Tunnel, and TUN.
-- **Modern transports & security** — TCP (Raw), mKCP, WebSocket, gRPC, HTTPUpgrade, and XHTTP, secured with TLS, XTLS, and REALITY.
-- **Fallbacks** — serve multiple protocols on a single port (e.g. VLESS and Trojan on 443) using Xray's fallback support.
-- **Per-client management** — traffic quotas, expiry dates, IP limits, live online status, and one-click share links, QR codes, and subscriptions.
-- **Traffic statistics** — per inbound, per client, and per outbound, with reset controls.
-- **Multi-node support** — manage and scale across multiple servers from a single panel.
-- **Outbound & routing** — WARP, NordVPN, custom routing rules, load balancers, and outbound proxy chaining.
-- **Built-in subscription server** with multiple output formats and [custom page templates](docs/custom-subscription-templates.md).
-- **Telegram bot** for remote monitoring and management.
-- **RESTful API** with in-panel Swagger documentation.
-- **Flexible storage** — SQLite (default) or PostgreSQL.
-- **13 UI languages** with dark and light themes.
-- **Fail2ban integration** for enforcing per-client IP limits.
+## 🏗️ معماری و تکنولوژی‌ها
 
-## Screenshots
+| بخش            | تکنولوژی                         |
+| -------------- | -------------------------------- |
+| فریم‌ورک       | Next.js 16 (App Router)          |
+| بک‌اند بلادرنگ | Socket.IO 4                      |
+| پایگاه داده    | MongoDB (از طریق Prisma ORM)     |
+| احراز هویت     | JWT + bcryptjs                   |
+| استایل         | Tailwind CSS 4 + Vanilla CSS     |
+| فونت           | Vazirmatn (فارسی) + Sora (لاتین) |
+| تماس صوتی      | WebRTC + TURN                    |
+| مانیتورینگ     | Sentry                           |
+| زبان           | TypeScript                       |
 
-<details>
-<summary>Click to expand</summary>
+---
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./media/01-overview-dark.png">
-  <img alt="Overview" src="./media/01-overview-light.png">
-</picture>
+## 📁 ساختار پروژه
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./media/02-add-inbound-dark.png">
-  <img alt="Inbounds" src="./media/02-add-inbound-light.png">
-</picture>
+```
+FelFelChat/
+├── src/
+│   ├── app/                  # صفحات و API Routes
+│   │   ├── page.tsx          # صفحه اصلی (چت)
+│   │   ├── login/            # صفحه ورود
+│   │   ├── signup/           # صفحه ثبت‌نام
+│   │   ├── profile/          # صفحه پروفایل
+│   │   ├── admin/            # پنل مدیریت
+│   │   └── api/              # REST API Routes
+│   ├── components/           # کامپوننت‌های React
+│   │   ├── ChatView.tsx      # رابط اصلی چت
+│   │   ├── Sidebar.tsx       # نوار کناری (لیست اتاق‌ها)
+│   │   ├── VoiceCall.tsx     # کامپوننت تماس صوتی
+│   │   ├── AppIcon.tsx       # آیکون‌های اپ
+│   │   ├── EmojiStickerPicker.tsx  # انتخاب‌گر ایموجی/استیکر
+│   │   ├── GroupMembersModal.tsx   # مدیریت اعضای گروه
+│   │   ├── ImagePreviewModal.tsx   # پیش‌نمایش تصویر
+│   │   ├── UserProfileModal.tsx    # پروفایل کاربر
+│   │   └── providers/        # کانتکست‌های React
+│   ├── lib/                  # ابزارها و سرویس‌ها
+│   │   ├── hushCrypto.ts     # رمزنگاری
+│   │   ├── i18n.ts           # چندزبانگی (FA/EN)
+│   │   ├── jwt.ts            # مدیریت توکن
+│   │   ├── prisma.ts         # اتصال پایگاه داده
+│   │   ├── routeAuth.ts      # احراز هویت روت‌ها
+│   │   ├── rateLimit.ts      # نرخ‌محدودی
+│   │   ├── auditLog.ts       # لاگ حسابرسی
+│   │   ├── backupIntegrity.ts # یکپارچگی پشتیبان
+│   │   ├── imageCompression.ts # فشرده‌سازی تصویر
+│   │   ├── monitoring.ts     # Sentry
+│   │   ├── logger.ts         # لاگر
+│   │   └── socket.ts         # Socket.IO Client
+│   └── assets/branding/      # لوگو و برندینگ
+├── prisma/
+│   ├── schema.prisma         # مدل‌های پایگاه داده
+│   ├── seed.ts               # داده‌های اولیه
+│   └── migrations/           # تاریخچه مایگریشن‌ها
+├── server.mjs                # سرور Node.js سفارشی
+├── docs/
+│   └── OPERATIONS.md         # راهنمای عملیات و نگهداری
+├── install.sh                # اسکریپت نصب و مدیریت (لینوکس)
+└── .env.example              # نمونه متغیرهای محیطی
+```
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./media/03-add-client-dark.png">
-  <img alt="Add client" src="./media/03-add-client-light.png">
-</picture>
+---
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./media/05-add-nodes-dark.png">
-  <img alt="Configs" src="./media/05-add-nodes-light.png">
-</picture>
+## ⚙️ پیش‌نیازها
 
-</details>
+- **Node.js** نسخه ۲۰ به بالا
+- **MongoDB** نسخه ۸ به بالا + **Replica Set** فعال
+- **npm**
 
-## Quick Start
+---
+
+## 🚀 راه‌اندازی سریع (لینوکس)
+
+با یک دستور، همه چیز نصب و راه‌اندازی می‌شود:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+curl -sL https://raw.githubusercontent.com/MatinSenPai/FelFelChat/main/install.sh | bash
 ```
 
-To install a specific version, append its tag (e.g. `v3.4.0`):
+بعد از نصب، با دستور `felfel` اپ را مدیریت کنید.
+
+---
+
+## 🛠️ راه‌اندازی دستی
+
+### ۱. کلون پروژه
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) v3.4.0
+git clone https://github.com/MatinSenPai/FelFelChat.git
+cd FelFelChat
 ```
 
-To install the rolling **dev** build (latest per-commit pre-release from `main`, not a stable release), pass `dev-latest`:
+### ۲. نصب وابستگی‌ها
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) dev-latest
+npm install
 ```
 
-During installation a random username, password, and access path are generated. After installation, run `x-ui` to open the management menu, where you can start/stop the service, view or reset your login credentials, manage SSL certificates, and more.
-
-For full documentation, please visit the [project Wiki](https://github.com/MHSanaei/3x-ui/wiki).
-
-### Unattended install
-
-The installer also runs **non-interactively** for cloud-init.
-Set `XUI_NONINTERACTIVE=1` (or pipe with no TTY) and it installs end-to-end with
-zero prompts, generating random credentials and writing them to
-`/etc/x-ui/install-result.env`. See [`deploy/`](deploy/) for:
-
-- [Cloud-init user-data](deploy/cloud-init/) — unattended install on any cloud (Hetzner/AWS/DO/Vultr/GCP/Azure/Oracle)
-- [Hetzner Cloud notes](deploy/marketplace/hetzner/) — cloud-init deployment on Hetzner
-
-## Supported Platforms
-
-**Operating systems:** Ubuntu, Debian, Armbian, Fedora, CentOS, RHEL, AlmaLinux, Rocky Linux, Oracle Linux, Amazon Linux, Virtuozzo, Arch, Manjaro, Parch, openSUSE (Tumbleweed / Leap), Alpine, and Windows.
-
-**Architectures:** `amd64` · `386` · `arm64` (aarch64) · `armv7` · `armv6` · `armv5` · `s390x`.
-
-## Database Options
-
-3X-UI supports two backends, chosen during the install:
-
-- **SQLite** (default) — a single file at `/etc/x-ui/x-ui.db`. Zero setup, ideal for small and medium deployments.
-- **PostgreSQL** — recommended for high client counts or multi-node setups. The installer can install PostgreSQL locally for you, or accept a DSN to an existing server.
-
-At runtime the backend is selected via environment variables (the installer writes these to `/etc/default/x-ui` for you):
-
-```
-XUI_DB_TYPE=postgres
-XUI_DB_DSN=postgres://xui:password@127.0.0.1:5432/xui?sslmode=disable
-```
-
-### Migrating an existing SQLite install to PostgreSQL
+### ۳. تنظیم متغیرهای محیطی
 
 ```bash
-x-ui migrate-db --dsn "postgres://xui:password@127.0.0.1:5432/xui?sslmode=disable"
-# then set XUI_DB_TYPE and XUI_DB_DSN in /etc/default/x-ui and restart:
-systemctl restart x-ui
+cp .env.example .env
 ```
 
-The source SQLite file is left untouched; remove it manually once you have verified the new backend.
+فایل `.env` را ویرایش کنید:
 
-### Docker
+```env
+NODE_ENV=development
+PORT=3000
+APP_ORIGIN=http://localhost:3000
 
-The default `docker compose up -d` keeps using SQLite. To run with the bundled PostgreSQL service, uncomment the two `XUI_DB_*` env lines in `docker-compose.yml` and start with the profile:
+JWT_SECRET=<یک رشته تصادفی بلند>
+DATABASE_URL=mongodb://127.0.0.1:27017/felfelchat?replicaSet=rs0&directConnection=true
+
+UPLOAD_DIR=./uploads
+UPLOAD_MAX_SIZE_MB=20
+
+BACKUP_DIR=./backups
+BACKUP_SIGNING_KEY=<یک رشته تصادفی بلند>
+
+AUDIT_LOG_DIR=./logs
+
+# اختیاری
+SENTRY_DSN=
+NEXT_PUBLIC_WEBRTC_TURN_URLS=
+NEXT_PUBLIC_WEBRTC_TURN_USERNAME=
+NEXT_PUBLIC_WEBRTC_TURN_CREDENTIAL=
+```
+
+### ۴. راه‌اندازی MongoDB با Replica Set
 
 ```bash
-docker compose --profile postgres up -d
+# در مسیر /etc/mongod.conf اضافه کنید:
+replication:
+  replSetName: "rs0"
+
+# سرویس را ری‌استارت کنید
+sudo systemctl restart mongod
+
+# Replica Set را راه‌اندازی کنید
+mongosh --eval "rs.initiate()"
 ```
 
-The image bundles Fail2ban (enabled by default) to enforce per-client **IP limits**. Fail2ban bans offenders with `iptables`, which requires the `NET_ADMIN` capability. `docker-compose.yml` already grants it via `cap_add`; if you start the container with `docker run` instead, add the capabilities yourself, otherwise bans are logged but never applied:
+### ۵. اجرای Migrations
 
 ```bash
-docker run -d --cap-add=NET_ADMIN --cap-add=NET_RAW ... ghcr.io/mhsanaei/3x-ui
+npm run db:migrate
 ```
 
-## Environment Variables
+### ۶. اجرای برنامه
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `XUI_DB_TYPE` | Database backend: `sqlite` or `postgres` | `sqlite` |
-| `XUI_DB_DSN` | PostgreSQL connection string (when `XUI_DB_TYPE=postgres`) | — |
-| `XUI_DB_FOLDER` | Directory for the SQLite database file | `/etc/x-ui` |
-| `XUI_DB_MAX_OPEN_CONNS` | Maximum open connections (PostgreSQL pool) | — |
-| `XUI_DB_MAX_IDLE_CONNS` | Maximum idle connections (PostgreSQL pool) | — |
-| `XUI_INIT_WEB_BASE_PATH` | The initial URI path for the web panel | `/` |
-| `XUI_ENABLE_FAIL2BAN` | Enable Fail2ban-based IP-limit enforcement | `true` |
-| `XUI_LOG_LEVEL` | Log verbosity (`debug`, `info`, `warning`, `error`) | `info` |
-| `XUI_DEBUG` | Enable debug mode | `false` |
-| `XUI_TUNNEL_HEALTH_MONITOR` | Enable the tunnel health monitor (probes a URL and restarts xray after repeated failures; a restart drops all clients) | `false` |
-| `XUI_TUNNEL_HEALTH_PROXY` | Proxy the probe is sent through; point it at a local xray inbound so the probe tests the tunnel (e.g. `socks5://127.0.0.1:1080`). Empty means the probe only checks host connectivity | — |
-| `XUI_TUNNEL_HEALTH_URL` | URL probed for tunnel health | `https://www.cloudflare.com/cdn-cgi/trace` |
-| `XUI_TUNNEL_HEALTH_INTERVAL` | Interval between probes | `30s` |
-| `XUI_TUNNEL_HEALTH_TIMEOUT` | Per-probe timeout | `10s` |
-| `XUI_TUNNEL_HEALTH_FAILURES` | Consecutive failures before a restart is triggered | `3` |
-| `XUI_TUNNEL_HEALTH_COOLDOWN` | Minimum delay between consecutive restarts | `5m` |
+```bash
+# محیط توسعه
+npm run dev
 
-## Supported Languages
+# محیط پروداکشن
+npm run build
+npm start
+```
 
-The panel UI is available in 13 languages:
+اپ در آدرس `http://localhost:3000` در دسترس است.
 
-English · فارسی · العربية · 中文（简体） · 中文（繁體） · Español · Русский · Українська · Türkçe · Tiếng Việt · 日本語 · Bahasa Indonesia · Português (Brasil)
+---
 
-## Contributing
+## 📜 دستورات مفید
 
-Contributions are welcome. Please read the [Contributing Guide](/CONTRIBUTING.md) before opening an issue or pull request.
+| دستور                | کاربرد                         |
+| -------------------- | ------------------------------ |
+| `npm run dev`        | اجرا در محیط توسعه             |
+| `npm run build`      | ساخت نسخه پروداکشن             |
+| `npm start`          | اجرا در محیط پروداکشن          |
+| `npm run lint`       | بررسی کیفیت کد                 |
+| `npm run db:migrate` | اجرای مایگریشن‌های پایگاه داده |
+| `npm run db:seed`    | بارگذاری داده‌های اولیه        |
+| `npm run db:studio`  | باز کردن Prisma Studio         |
 
-## A Special Thanks to
+---
 
-- [alireza0](https://github.com/alireza0/)
+## 🔐 متغیرهای محیطی
 
-## Acknowledgment
+| متغیر                          | اجباری | توضیح                        |
+| ------------------------------ | ------ | ---------------------------- |
+| `JWT_SECRET`                   | ✅     | کلید رمزنگاری توکن‌ها        |
+| `DATABASE_URL`                 | ✅     | آدرس اتصال MongoDB           |
+| `APP_ORIGIN`                   | ✅     | آدرس عمومی اپ                |
+| `BACKUP_SIGNING_KEY`           | ✅     | کلید امضای فایل‌های پشتیبان  |
+| `PORT`                         | ❌     | پورت سرور (پیش‌فرض: ۳۰۰۰)    |
+| `UPLOAD_DIR`                   | ❌     | مسیر ذخیره فایل‌های آپلودشده |
+| `UPLOAD_MAX_SIZE_MB`           | ❌     | حداکثر سایز فایل (MB)        |
+| `SENTRY_DSN`                   | ❌     | DSN مانیتورینگ Sentry        |
+| `NEXT_PUBLIC_WEBRTC_TURN_URLS` | ❌     | آدرس‌های TURN Server         |
 
-- [Iran v2ray rules](https://github.com/chocolate4u/Iran-v2ray-rules) (License: **GPL-3.0**): _Enhanced v2ray/xray and v2ray/xray-clients routing rules with built-in Iranian domains and a focus on security and adblocking._
-- [Russia v2ray rules](https://github.com/runetfreedom/russia-v2ray-rules-dat) (License: **GPL-3.0**): _This repository contains automatically updated V2Ray routing rules based on data on blocked domains and addresses in Russia._
+---
 
-## Community Tools
+## 🏥 بررسی سلامت سرور
 
-Tools and integrations built by the community around 3x-ui.
+| Endpoint          | توضیح           |
+| ----------------- | --------------- |
+| `GET /api/health` | وضعیت کلی سرور  |
+| `GET /api/ready`  | آمادگی سرویس‌ها |
 
-- [terraform-provider-3x-ui](https://github.com/batonogov/terraform-provider-threexui) (License: **MIT**): _Manage inbounds, clients, panel settings, and Xray configuration as code with Terraform / OpenTofu._
+---
 
-## Support project
+## 👑 سوپرادمین
 
-**If this project is helpful to you, you may wish to give it a**:star2:
+### سوپرادمین چیست؟
 
-<a href="https://www.buymeacoffee.com/MHSanaei" target="_blank">
-<img src="./media/default-yellow.png" alt="Buy Me A Coffee" style="height: 70px !important;width: 277px !important;" >
-</a>
+سوپرادمین تنها کاربری است که به **پنل مدیریت** (`/admin`) دسترسی دارد. این حساب در اولین نصب توسط اسکریپت ایجاد می‌شود.
 
-</br>
-<a href="https://nowpayments.io/donation/hsanaei" target="_blank" rel="noreferrer noopener">
-   <img src="./media/donation-button-black.svg" alt="Crypto donation button by NOWPayments">
-</a>
+### دسترسی به پنل مدیریت
 
-## Stargazers over Time
+۱. به آدرس `http://your-server/admin` بروید
+۲. با اطلاعات سوپرادمین وارد شوید
+۳. (در صورت بسته بودن ثبت‌نام، از بخش Login استفاده کنید)
 
-[![Stargazers over time](https://starchart.cc/MHSanaei/3x-ui.svg?variant=adaptive)](https://starchart.cc/MHSanaei/3x-ui)
+قابلیت‌های پنل مدیریت:
+
+| بخش         | توضیح                              |
+| ----------- | ---------------------------------- |
+| Users       | مدیریت کاربران، بستن حساب، بن کردن |
+| Rooms       | مدیریت اتاق‌های گفتگو              |
+| Messages    | مشاهده پیام‌های همه اتاق‌ها        |
+| Calls       | تاریخچه و وضعیت تماس‌های صوتی      |
+| Storage     | مدیریت فضای ذخیره‌سازی             |
+| Backup      | ساخت و بازیابی پشتیبان             |
+| Settings    | روشن/خاموش کردن ثبت‌نام            |
+| Sticker/GIF | آپلود و مدیریت استیکر و GIF        |
+
+### تغییر مشخصات سوپرادمین (از طریق وب)
+
+در پنل مدیریت، در پایین صفحه داشبورد، بخش **🔐 Superadmin Profile** وجود دارد:
+
+- نام کاربری جدید (اختیاری)
+- نام نمایشی جدید
+- رمز عبور جدید (اختیاری)
+- رمز عبور فعلی (الزامی برای تأیید)
+
+### تغییر مشخصات سوپرادمین (از طریق سرور)
+
+اگر به پنل وب دسترسی ندارید یا رمز عبور را فراموش کرده‌اید، از دستور زیر در سرور استفاده کنید:
+
+```bash
+# روش ۱: از طریق TUI (توصیه شده)
+felfel          # منو اصلی
+# گزینه 16 را انتخاب کنید: Change superadmin password/username
+
+# روش ۲: مستقیم
+felfel superadmin
+```
+
+این دستور موارد زیر را می‌پرسد:
+
+- نام کاربری جدید (اختیاری — خالی بگذارید تا تغییر نکند)
+- نام نمایشی جدید (اختیاری)
+- رمز عبور جدید (اختیاری — خالی بگذارید تا تغییر نکند)
+- تأیید رمز عبور جدید
+
+> **توجه:** این دستور مستقیماً در MongoDB تغییر می‌دهد و نیازی به اجرای اپلیکیشن ندارد.
+
+---
+
+## 📄 لایسنس
+
+این پروژه تحت لایسنس MIT منتشر شده است.
+
+</div>
+
+---
+
+---
+
+<div dir="ltr">
+
+# 💬 FelFelChat
+
+**FelFelChat** is a modern, secure, self-hosted real-time messaging application built with Next.js, Socket.IO, and MongoDB. It features real-time chat, WebRTC voice calls, end-to-end encryption, multilingual support (Farsi/English), and a powerful admin panel.
+
+---
+
+## ✨ Features
+
+- **Real-time Messaging** — Group and private chat powered by Socket.IO
+- **Voice Calls** — One-on-one calls via WebRTC
+- **Message Encryption** — Sensitive messages encrypted with `hushCrypto`
+- **File Uploads** — Send images, videos, PDFs, and more
+- **Stickers & GIFs** — Custom sticker and GIF support
+- **Secure Auth** — JWT cookies + bcrypt password hashing
+- **Admin Panel** — Manage users, rooms, calls, backups, and storage
+- **Multilingual** — Full Farsi and English support with RTL/LTR layouts
+- **Audit Logging** — All critical events are logged
+- **Signed Backups** — Cryptographically signed backup/restore
+- **Rate Limiting** — API abuse protection
+- **Monitoring** — Sentry integration
+
+---
+
+## 🏗️ Tech Stack
+
+| Layer       | Technology                         |
+| ----------- | ---------------------------------- |
+| Framework   | Next.js 16 (App Router)            |
+| Real-time   | Socket.IO 4                        |
+| Database    | MongoDB via Prisma ORM             |
+| Auth        | JWT + bcryptjs                     |
+| Styling     | Tailwind CSS 4 + Vanilla CSS       |
+| Fonts       | Vazirmatn (Persian) + Sora (Latin) |
+| Voice Calls | WebRTC + TURN                      |
+| Monitoring  | Sentry                             |
+| Language    | TypeScript                         |
+
+---
+
+## 📁 Project Structure
+
+```
+FelFelChat/
+├── src/
+│   ├── app/                  # Pages and API Routes
+│   │   ├── page.tsx          # Main chat page
+│   │   ├── login/            # Login page
+│   │   ├── signup/           # Sign-up page
+│   │   ├── profile/          # User profile page
+│   │   ├── admin/            # Admin panel
+│   │   └── api/              # REST API routes
+│   ├── components/           # React components
+│   │   ├── ChatView.tsx      # Main chat interface
+│   │   ├── Sidebar.tsx       # Room list sidebar
+│   │   ├── VoiceCall.tsx     # Voice call UI
+│   │   ├── AppIcon.tsx       # App icons
+│   │   ├── EmojiStickerPicker.tsx  # Emoji/sticker picker
+│   │   ├── GroupMembersModal.tsx   # Group member management
+│   │   ├── ImagePreviewModal.tsx   # Image preview
+│   │   ├── UserProfileModal.tsx    # User profile modal
+│   │   └── providers/        # React contexts
+│   ├── lib/                  # Utilities and services
+│   │   ├── hushCrypto.ts     # Encryption
+│   │   ├── i18n.ts           # Internationalization (FA/EN)
+│   │   ├── jwt.ts            # Token management
+│   │   ├── prisma.ts         # Database client
+│   │   ├── routeAuth.ts      # Route authentication
+│   │   ├── rateLimit.ts      # Rate limiting
+│   │   ├── auditLog.ts       # Audit logging
+│   │   ├── backupIntegrity.ts # Backup verification
+│   │   ├── imageCompression.ts # Client-side image compression
+│   │   ├── monitoring.ts     # Sentry init
+│   │   ├── logger.ts         # Structured logger
+│   │   └── socket.ts         # Socket.IO client helper
+│   └── assets/branding/      # Logo and branding assets
+├── prisma/
+│   ├── schema.prisma         # Database models
+│   ├── seed.ts               # Seed data
+│   └── migrations/           # Migration history
+├── server.mjs                # Custom Node.js server (Next.js + Socket.IO)
+├── docs/
+│   └── OPERATIONS.md         # Operations runbook
+├── install.sh                # Linux one-command installer & manager
+└── .env.example              # Environment variable template
+```
+
+---
+
+## ⚙️ Prerequisites
+
+- **Node.js** v20 or later
+- **MongoDB** v8 or later with a **Replica Set** configured
+- **npm**
+
+---
+
+## 🚀 Quick Install (Linux)
+
+Install and configure everything with a single command:
+
+```bash
+curl -sL https://raw.githubusercontent.com/MatinSenPai/FelFelChat/main/install.sh | bash
+```
+
+After installation, use the `felfel` command to manage your server.
+
+---
+
+## 🛠️ Manual Setup
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/MatinSenPai/FelFelChat.git
+cd FelFelChat
+```
+
+### 2. Install dependencies
+
+```bash
+npm install
+```
+
+### 3. Configure environment variables
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your values:
+
+```env
+NODE_ENV=development
+PORT=3000
+APP_ORIGIN=http://localhost:3000
+
+JWT_SECRET=<long-random-secret>
+DATABASE_URL=mongodb://127.0.0.1:27017/felfelchat?replicaSet=rs0&directConnection=true
+
+UPLOAD_DIR=./uploads
+UPLOAD_MAX_SIZE_MB=20
+
+BACKUP_DIR=./backups
+BACKUP_SIGNING_KEY=<long-random-signing-key>
+
+AUDIT_LOG_DIR=./logs
+
+# Optional
+SENTRY_DSN=
+NEXT_PUBLIC_WEBRTC_TURN_URLS=
+NEXT_PUBLIC_WEBRTC_TURN_USERNAME=
+NEXT_PUBLIC_WEBRTC_TURN_CREDENTIAL=
+```
+
+### 4. Set up MongoDB with Replica Set
+
+MongoDB Replica Set is required for Prisma change streams. Add the following to `/etc/mongod.conf`:
+
+```yaml
+replication:
+  replSetName: 'rs0'
+```
+
+Then restart and initialize:
+
+```bash
+sudo systemctl restart mongod
+mongosh --eval "rs.initiate()"
+```
+
+### 5. Run database migrations
+
+```bash
+npm run db:migrate
+```
+
+### 6. Start the app
+
+```bash
+# Development
+npm run dev
+
+# Production
+npm run build
+npm start
+```
+
+The app is available at `http://localhost:3000`.
+
+---
+
+## 📜 Scripts
+
+| Command              | Description               |
+| -------------------- | ------------------------- |
+| `npm run dev`        | Start in development mode |
+| `npm run build`      | Build for production      |
+| `npm start`          | Start in production mode  |
+| `npm run lint`       | Lint the codebase         |
+| `npm run db:migrate` | Apply database migrations |
+| `npm run db:seed`    | Seed initial data         |
+| `npm run db:studio`  | Open Prisma Studio        |
+
+---
+
+## 🔐 Environment Variables
+
+| Variable                             | Required | Description                      |
+| ------------------------------------ | -------- | -------------------------------- |
+| `JWT_SECRET`                         | ✅       | Secret key for signing JWTs      |
+| `DATABASE_URL`                       | ✅       | MongoDB connection string        |
+| `APP_ORIGIN`                         | ✅       | Public app URL (for CORS)        |
+| `BACKUP_SIGNING_KEY`                 | ✅       | Key for signing backup files     |
+| `PORT`                               | ❌       | Server port (default: 3000)      |
+| `UPLOAD_DIR`                         | ❌       | Directory for uploaded files     |
+| `UPLOAD_MAX_SIZE_MB`                 | ❌       | Max upload size in MB            |
+| `SENTRY_DSN`                         | ❌       | Sentry monitoring DSN            |
+| `NEXT_PUBLIC_WEBRTC_TURN_URLS`       | ❌       | TURN server URLs for voice calls |
+| `NEXT_PUBLIC_WEBRTC_TURN_USERNAME`   | ❌       | TURN server username             |
+| `NEXT_PUBLIC_WEBRTC_TURN_CREDENTIAL` | ❌       | TURN server credential           |
+
+---
+
+## 🏥 Health Checks
+
+| Endpoint          | Description                                                         |
+| ----------------- | ------------------------------------------------------------------- |
+| `GET /api/health` | Overall server status                                               |
+| `GET /api/ready`  | Service readiness check (returns 503 if dependencies are unhealthy) |
+
+---
+
+## 🛡️ Security
+
+- All routes are protected by JWT authentication middleware
+- Passwords hashed with **bcrypt**
+- Uploaded files are served from a sandboxed directory with path-traversal protection
+- Content Security Policy, X-Frame-Options, and other security headers applied on every response
+- `JWT_SECRET` and `BACKUP_SIGNING_KEY` should be rotated regularly (see `docs/OPERATIONS.md`)
+
+---
+
+## 👑 Superadmin
+
+### What is the Superadmin?
+
+The superadmin is the only account with access to the **Admin Panel** (`/admin`). It is created automatically during installation by `install.sh`.
+
+### Accessing the Admin Panel
+
+1. Navigate to `http://your-server/admin`
+2. Log in with your superadmin credentials
+3. The panel is **only visible** to the superadmin account
+
+| Section     | Description                               |
+| ----------- | ----------------------------------------- |
+| Users       | Manage users, ban accounts                |
+| Rooms       | View and manage chat rooms                |
+| Messages    | Browse all room messages                  |
+| Calls       | Voice call history and active call status |
+| Storage     | Manage uploaded files                     |
+| Backup      | Create & restore database backups         |
+| Settings    | Toggle user registration on/off           |
+| Sticker/GIF | Upload and manage custom stickers & GIFs  |
+
+### Changing Superadmin Credentials (Web UI)
+
+At the bottom of the Admin Dashboard there is a **🔐 Superadmin Profile** card where you can change:
+
+- **Username** (optional)
+- **Display name**
+- **Password** (optional, min 8 characters)
+- **Current password** is always required to confirm changes
+
+### Changing Superadmin Credentials (Server CLI)
+
+If you cannot access the web panel or have forgotten the password, use the `felfel` command directly on the server:
+
+```bash
+# Recommended: interactive TUI menu
+felfel
+# Select option 16: Change superadmin password/username
+
+# Direct command
+felfel superadmin
+```
+
+You will be prompted for:
+
+- New username (optional — leave blank to keep current)
+- New display name (optional)
+- New password (optional — leave blank to keep current)
+- Password confirmation
+
+> **Note:** This command updates MongoDB directly. The app does not need to be running.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License.
+
+</div>

@@ -1,1757 +1,2560 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-red='\033[0;31m'
-green='\033[0;32m'
-blue='\033[0;34m'
-yellow='\033[0;33m'
-plain='\033[0m'
+# FelFel unified installer + manager
+# One-liner:
+#   curl -sL https://raw.githubusercontent.com/MatinSenPai/FelFelChat/main/install.sh | bash
+#
+# After install:
+#   felfel
 
-xui_folder="${XUI_MAIN_FOLDER:=/usr/local/x-ui}"
-xui_service="${XUI_SERVICE:=/etc/systemd/system}"
+APP_NAME="FelFel Chat"
+SCRIPT_VERSION="2026.02.26-15"
+DEFAULT_SERVICE_NAME="felfelchat"
+DEFAULT_REPO="${GIT_REPO_URL:-${GITHUB_REPO:-https://github.com/MatinSenPai/FelFelChat}}"
+DEFAULT_REF="${GITHUB_REF:-main}"
+CONFIG_DIR="${HOME}/.config/felfel"
+CONFIG_FILE="${CONFIG_DIR}/config"
 
-# check root
-[[ $EUID -ne 0 ]] && echo -e "${red}Fatal error: ${plain} Please run this script with root privilege \n " && exit 1
+COLOR_CYAN="\033[36m"
+COLOR_GREEN="\033[32m"
+COLOR_YELLOW="\033[33m"
+COLOR_RED="\033[31m"
+COLOR_BOLD="\033[1m"
+COLOR_RESET="\033[0m"
 
-# Check OS and set release variable
-if [[ -f /etc/os-release ]]; then
-    source /etc/os-release
-    release=$ID
-elif [[ -f /usr/lib/os-release ]]; then
-    source /usr/lib/os-release
-    release=$ID
-else
-    echo "Failed to check the system OS, please contact the author!" >&2
+if [[ ! -t 1 ]]; then
+  COLOR_CYAN=""
+  COLOR_GREEN=""
+  COLOR_YELLOW=""
+  COLOR_RED=""
+  COLOR_BOLD=""
+  COLOR_RESET=""
+fi
+
+APP_DIR=""
+SERVICE_NAME="$DEFAULT_SERVICE_NAME"
+USE_SYSTEMD="1"
+ENV_FILE=""
+PID_FILE=""
+LOG_DIR=""
+OUT_LOG=""
+ERR_LOG=""
+BACKUP_DIR=""
+LAST_DEPLOY_FILE=""
+LAST_BACKUP_FILE=""
+INTERACTIVE="0"
+
+log() { printf "%b[FelFel]%b %s\n" "$COLOR_CYAN" "$COLOR_RESET" "$1"; }
+ok() { printf "%b[OK]%b %s\n" "$COLOR_GREEN" "$COLOR_RESET" "$1"; }
+warn() { printf "%b[WARN]%b %s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$1"; }
+err() { printf "%b[ERROR]%b %s\n" "$COLOR_RED" "$COLOR_RESET" "$1" >&2; }
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    err "Missing command: $1"
     exit 1
-fi
-echo "The OS release is: $release"
+  fi
+}
 
-arch() {
-    case "$(uname -m)" in
-        x86_64 | x64 | amd64) echo 'amd64' ;;
-        i*86 | x86) echo '386' ;;
-        armv8* | armv8 | arm64 | aarch64) echo 'arm64' ;;
-        armv7* | armv7 | arm) echo 'armv7' ;;
-        armv6* | armv6) echo 'armv6' ;;
-        armv5* | armv5) echo 'armv5' ;;
-        s390x) echo 's390x' ;;
-        *) echo -e "${green}Unsupported CPU architecture! ${plain}" && rm -f "$(realpath "$0")" && exit 1 ;;
+detect_interactive() {
+  if [[ "${FELFEL_AUTO:-0}" == "1" ]]; then
+    INTERACTIVE="0"
+    return
+  fi
+  if [[ -t 0 && -t 1 ]]; then
+    INTERACTIVE="1"
+  else
+    INTERACTIVE="0"
+  fi
+}
+
+prompt_with_default() {
+  local label="$1"
+  local default_value="$2"
+  local answer=""
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    read -r -p "${label} [${default_value}]: " answer
+    echo "${answer:-$default_value}"
+  else
+    printf "%b[FelFel]%b %s\n" "$COLOR_CYAN" "$COLOR_RESET" "${label}: using default '${default_value}' (non-interactive mode)" >&2
+    echo "$default_value"
+  fi
+}
+
+as_root() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+    return
+  fi
+  err "Root access is required to install system packages. Run as root or install sudo."
+  exit 1
+}
+
+run_pipe_to_root_bash() {
+  local script_url="$1"
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 "$script_url" | bash -
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 "$script_url" | sudo -E bash -
+    return
+  fi
+  err "Root access is required to run bootstrap script: $script_url"
+  exit 1
+}
+
+run_with_retries() {
+  local attempts="$1"
+  shift
+  local i=1
+  while (( i <= attempts )); do
+    if "$@"; then
+      return 0
+    fi
+    warn "Attempt ${i}/${attempts} failed: $*"
+    sleep $((i * 2))
+    i=$((i + 1))
+  done
+  return 1
+}
+
+detect_pkg_manager() {
+  if command -v apt-get >/dev/null 2>&1; then echo "apt"; return; fi
+  if command -v dnf >/dev/null 2>&1; then echo "dnf"; return; fi
+  if command -v yum >/dev/null 2>&1; then echo "yum"; return; fi
+  if command -v apk >/dev/null 2>&1; then echo "apk"; return; fi
+  if command -v pacman >/dev/null 2>&1; then echo "pacman"; return; fi
+  echo "unknown"
+}
+
+# ------------------------------------------------------------------
+# Remove broken/stale MongoDB apt repo files that return 403.
+# On geo-restricted networks (e.g. Iranian VPS), a leftover
+# /etc/apt/sources.list.d/mongodb-org-*.list from a previous
+# install attempt will cause ALL apt-get update calls to fail.
+# This function proactively cleans them up if they are unreachable.
+# ------------------------------------------------------------------
+_cleanup_broken_apt_repos() {
+  local mongo_lists
+  mongo_lists=(/etc/apt/sources.list.d/mongodb-org-*.list /etc/apt/sources.list.d/mongodb-enterprise-*.list)
+  local found_any="0"
+  for f in "${mongo_lists[@]}"; do
+    [[ -f "$f" ]] && found_any="1" && break
+  done
+  [[ "$found_any" == "1" ]] || return 0
+
+  # Quick connectivity test: try fetching the InRelease from the repo
+  # If it returns 403/Forbidden, remove the offending source file.
+  for f in "${mongo_lists[@]}"; do
+    [[ -f "$f" ]] || continue
+    local repo_url
+    repo_url="$(grep -oP 'https?://[^ ]+' "$f" 2>/dev/null | head -1 || true)"
+    if [[ -n "$repo_url" ]]; then
+      local http_code
+      http_code="$(curl -sL -o /dev/null -w '%{http_code}' --max-time 10 --connect-timeout 5 "${repo_url}/InRelease" 2>/dev/null || echo "000")"
+      if [[ "$http_code" == "403" || "$http_code" == "000" ]]; then
+        warn "Removing blocked MongoDB apt repo: $f (HTTP ${http_code})"
+        as_root rm -f "$f"
+        # Also clean from sources.list
+        if [[ -f /etc/apt/sources.list ]]; then
+          as_root sed -i '/repo\.mongodb\.org\/apt\/.*mongodb-org\//d; /repo\.mongodb\.org\/apt\/.*mongodb-enterprise\//d' /etc/apt/sources.list 2>/dev/null || true
+        fi
+      fi
+    fi
+  done
+}
+
+pkg_install() {
+  local mgr="$1"
+  shift
+  case "$mgr" in
+    apt)
+      # Clean up any stale MongoDB apt repos that return 403 (geo-blocked)
+      # to prevent them from breaking all future apt operations.
+      _cleanup_broken_apt_repos
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get update -y
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+      ;;
+    dnf) as_root dnf install -y "$@" ;;
+    yum) as_root yum install -y "$@" ;;
+    apk) as_root apk add --no-cache "$@" ;;
+    pacman) as_root pacman -Sy --noconfirm --needed "$@" ;;
+    *)
+      err "Unsupported package manager. Install these manually: $*"
+      exit 1
+      ;;
+  esac
+}
+
+ensure_base_tools() {
+  local mgr
+  mgr="$(detect_pkg_manager)"
+
+  if ! command -v git >/dev/null 2>&1; then
+    log "Installing git..."
+    case "$mgr" in
+      apt|dnf|yum|apk|pacman) pkg_install "$mgr" git ;;
+      *) err "git is required but package manager is unsupported."; exit 1 ;;
     esac
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log "Installing curl..."
+    case "$mgr" in
+      apt|dnf|yum|apk|pacman) pkg_install "$mgr" curl ;;
+      *) err "curl is required but package manager is unsupported."; exit 1 ;;
+    esac
+  fi
+
+  if ! command -v openssl >/dev/null 2>&1; then
+    log "Installing openssl..."
+    case "$mgr" in
+      apt|dnf|yum|apk|pacman) pkg_install "$mgr" openssl ;;
+      *) warn "openssl not found; fallback random generator will be used." ;;
+    esac
+  fi
+
+  # Ensure CA bundle exists for TLS endpoints (GitHub/registry).
+  if [[ ! -f "/etc/ssl/certs/ca-certificates.crt" ]] && [[ ! -f "/etc/pki/tls/certs/ca-bundle.crt" ]]; then
+    log "Installing CA certificates..."
+    case "$mgr" in
+      apt|dnf|yum|apk|pacman) pkg_install "$mgr" ca-certificates ;;
+      *) warn "CA certificate bundle not found; TLS operations may fail." ;;
+    esac
+  fi
 }
 
-echo "Arch: $(arch)"
+ensure_node_toolchain() {
+  local mgr
+  mgr="$(detect_pkg_manager)"
+  local min_node_major current_node_major current_node_version
+  min_node_major=20
 
-# Non-interactive mode: triggered explicitly via XUI_NONINTERACTIVE=1, or
-# implicitly when stdin is not a TTY (e.g. `curl ... | bash`, cloud-init).
-# In this mode every prompt below is replaced by an env var or a sane default.
-if [[ "${XUI_NONINTERACTIVE:-0}" == "1" ]] || [[ ! -t 0 ]]; then
-    NONINTERACTIVE=1
-else
-    NONINTERACTIVE=0
-fi
-export NONINTERACTIVE
+  node_major() {
+    local raw="${1:-v0.0.0}"
+    raw="${raw#v}"
+    echo "${raw%%.*}"
+  }
 
-# Simple helpers
-is_ipv4() {
-    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && return 0 || return 1
-}
-is_ipv6() {
-    [[ "$1" =~ : ]] && return 0 || return 1
-}
-is_ip() {
-    is_ipv4 "$1" || is_ipv6 "$1"
-}
-is_domain() {
-    [[ "$1" =~ ^([A-Za-z0-9](-*[A-Za-z0-9])*\.)+(xn--[a-z0-9]{2,}|[A-Za-z]{2,})$ ]] && return 0 || return 1
+  current_node_version="$(node -v 2>/dev/null || echo "v0.0.0")"
+  current_node_major="$(node_major "$current_node_version")"
+
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [[ "$current_node_major" -ge "$min_node_major" ]]; then
+    return
+  fi
+
+  if command -v node >/dev/null 2>&1; then
+    warn "Detected old Node.js ${current_node_version}. Upgrading to Node.js ${min_node_major}+..."
+  else
+    log "Installing Node.js + npm (detected package manager: ${mgr})..."
+  fi
+
+  case "$mgr" in
+    apt)
+      pkg_install "$mgr" ca-certificates gnupg
+      # Ubuntu/Debian often has legacy Node 12 split packages that conflict with NodeSource nodejs.
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get remove -y libnode-dev nodejs-doc >/dev/null 2>&1 || true
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y libnode-dev nodejs-doc >/dev/null 2>&1 || true
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get -f install -y >/dev/null 2>&1 || true
+      log "Using NodeSource Node.js 20 for apt..."
+      run_pipe_to_root_bash "https://deb.nodesource.com/setup_20.x"
+      pkg_install "$mgr" nodejs || {
+        warn "First Node.js install attempt failed; trying apt repair and retry..."
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get -f install -y || true
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get remove -y libnode-dev nodejs-doc || true
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y libnode-dev nodejs-doc || true
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get -f install -y || true
+        pkg_install "$mgr" nodejs
+      }
+      ;;
+    dnf|yum)
+      log "Using NodeSource Node.js 20 for rpm..."
+      run_pipe_to_root_bash "https://rpm.nodesource.com/setup_20.x"
+      pkg_install "$mgr" nodejs
+      ;;
+    apk)
+      pkg_install "$mgr" nodejs npm
+      ;;
+    pacman)
+      pkg_install "$mgr" nodejs npm
+      ;;
+    *)
+      err "Cannot auto-install Node.js/npm on this system."
+      err "Please install Node.js 20+ and npm, then run installer again."
+      exit 1
+      ;;
+  esac
+
+  if ! command -v node >/dev/null 2>&1; then
+    err "Node.js installation failed."
+    exit 1
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    err "npm installation failed."
+    err "Try running manually: apt/dnf/yum install npm (or rerun installer with internet access)."
+    exit 1
+  fi
+  current_node_version="$(node -v 2>/dev/null || echo "v0.0.0")"
+  current_node_major="$(node_major "$current_node_version")"
+  if [[ "$current_node_major" -lt "$min_node_major" ]]; then
+    err "Node.js ${min_node_major}+ is required, but found ${current_node_version}."
+    err "Please install Node.js ${min_node_major}+ and rerun installer."
+    exit 1
+  fi
 }
 
-# acme.sh's standalone server binds IPv4 by default; --listen-v6 makes it
-# v6-only, which breaks HTTP-01 validation when the domain's A record points
-# at this host's IPv4 (#4994). Only force IPv6 when the host has no global
-# IPv4 address at all.
-acme_listen_flag() {
-    if ip -4 addr show scope global 2> /dev/null | grep -q "inet "; then
-        echo ""
+ensure_mongodb_packages() {
+  local mgr series key_series distro codename component repo_file keyring repo_line pgp_tmp pgp_downloaded
+  mgr="$(detect_pkg_manager)"
+  series="${FELFEL_MONGODB_SERIES:-}"
+
+  # Allow skipping automatic MongoDB install (useful on restricted networks).
+  # Set FELFEL_MONGODB_SKIP_INSTALL=1 if MongoDB is already installed.
+  if [[ "${FELFEL_MONGODB_SKIP_INSTALL:-0}" == "1" ]]; then
+    log "Skipping MongoDB package install (FELFEL_MONGODB_SKIP_INSTALL=1)"
+    return 0
+  fi
+
+  case "$mgr" in
+    apt)
+      pkg_install "$mgr" ca-certificates curl gnupg
+      distro="$(. /etc/os-release && echo "${ID:-ubuntu}")"
+      if [[ "$distro" != "ubuntu" && "$distro" != "debian" ]]; then
+        if . /etc/os-release && [[ "${ID_LIKE:-}" == *"ubuntu"* ]]; then
+          distro="ubuntu"
+        elif . /etc/os-release && [[ "${ID_LIKE:-}" == *"debian"* ]]; then
+          distro="debian"
+        else
+          distro="ubuntu"
+        fi
+      fi
+      codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+      if [[ -z "$codename" ]]; then
+        codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-}")"
+      fi
+      if [[ -z "$codename" ]]; then
+        codename="$(lsb_release -sc 2>/dev/null || echo "jammy")"
+      fi
+      [[ -n "$series" ]] || series="8.0"
+      component="main"
+      [[ "$distro" != "ubuntu" ]] || component="multiverse"
+
+      # ----------------------------------------------------------------
+      # FELFEL_MONGODB_MIRROR : custom apt mirror base URL
+      #   e.g. http://mirror.example.com/mongodb
+      #   Mirror must serve same directory structure as repo.mongodb.org/apt/
+      # FELFEL_MONGODB_PGP_MIRROR : base URL serving .asc PGP key files
+      #   e.g. http://mirror.example.com/pgp
+      # ----------------------------------------------------------------
+      local mongo_apt_mirror="${FELFEL_MONGODB_MIRROR:-}"
+
+      key_series=""
+      keyring=""
+      pgp_tmp="/tmp/felfel-mongodb-server.asc"
+      as_root rm -f /etc/apt/sources.list.d/mongodb-org-*.list \
+                    /etc/apt/sources.list.d/mongodb-enterprise-*.list 2>/dev/null || true
+      if [[ -f /etc/apt/sources.list ]]; then
+        as_root sed -i \
+          '/repo\.mongodb\.org\/apt\/.*mongodb-org\//d
+           /repo\.mongodb\.org\/apt\/.*mongodb-enterprise\//d' \
+          /etc/apt/sources.list || true
+      fi
+
+      # Step 1: Download MongoDB PGP signing key.
+      # On geo-restricted networks (e.g. Iran), the official MongoDB CDN
+      # (pgp.mongodb.com / fastdl.mongodb.org) may return 403.
+      # We try: official CDN -> mongodb.org static -> custom mirror ->
+      #         Ubuntu keyserver (hkp usually unblocked by network firewalls).
+      pgp_downloaded="0"
+      local pgp_mirror_base="${FELFEL_MONGODB_PGP_MIRROR:-}"
+
+      for key_series in "$series" "8.0"; do
+        [[ -n "$key_series" ]] || continue
+        local pgp_urls=()
+        pgp_urls+=("https://pgp.mongodb.com/server-${key_series}.asc")
+        pgp_urls+=("https://www.mongodb.org/static/pgp/server-${key_series}.asc")
+        [[ -z "$pgp_mirror_base" ]] || pgp_urls+=("${pgp_mirror_base}/server-${key_series}.asc")
+
+        for pgp_url in "${pgp_urls[@]}"; do
+          log "Trying MongoDB PGP key: ${pgp_url}"
+          if curl -fsSL --max-time 30 --retry 2 "${pgp_url}" -o "$pgp_tmp" 2>/dev/null \
+             && grep -q "BEGIN PGP" "$pgp_tmp" 2>/dev/null; then
+            pgp_downloaded="1"; break
+          fi
+          rm -f "$pgp_tmp"
+        done
+        [[ "$pgp_downloaded" == "1" ]] && break
+
+        # Fallback: Ubuntu keyserver (usually reachable when CDN is geo-blocked)
+        log "CDN blocked. Trying Ubuntu keyserver for MongoDB ${key_series} key..."
+        local mongo_key_ids=(
+          "B00A0BD1E2C63C11"
+          "20691EEC35216C63"
+          "E162F504A20CDF15"
+          "99DB70FAE1D7CE227FB6488206B2552E"
+        )
+        for key_id in "${mongo_key_ids[@]}"; do
+          rm -f /tmp/felfel-mongo-tmp.gpg /tmp/felfel-mongo-tmp.gpg~ 2>/dev/null || true
+          if gpg --no-default-keyring \
+               --keyring /tmp/felfel-mongo-tmp.gpg \
+               --keyserver hkp://keyserver.ubuntu.com \
+               --recv-keys "$key_id" 2>/dev/null; then
+            gpg --no-default-keyring \
+              --keyring /tmp/felfel-mongo-tmp.gpg \
+              --export --armor "$key_id" > "$pgp_tmp" 2>/dev/null || true
+            rm -f /tmp/felfel-mongo-tmp.gpg /tmp/felfel-mongo-tmp.gpg~ 2>/dev/null || true
+            if [[ -s "$pgp_tmp" ]]; then
+              pgp_downloaded="1"; break
+            fi
+          fi
+        done
+        [[ "$pgp_downloaded" == "1" ]] && break
+      done
+
+      if [[ "$pgp_downloaded" != "1" ]]; then
+        warn "Could not download MongoDB PGP key from any source."
+        warn "Trying direct binary tarball install as final fallback..."
+        if _install_mongodb_deb_direct "$series" "$codename" "$distro"; then
+          return 0
+        fi
+        err "MongoDB installation failed. Try one of the following env vars:"
+        err "  FELFEL_MONGODB_PGP_MIRROR=<url>  – mirror serving server-X.Y.asc files"
+        err "  FELFEL_MONGODB_MIRROR=<url>       – apt mirror base URL"
+        err "  FELFEL_MONGODB_DEB_MIRROR=<url>   – binary tarball mirror"
+        err "  FELFEL_MONGODB_SKIP_INSTALL=1     – skip (if MongoDB already installed)"
+        exit 1
+      fi
+
+      keyring="/usr/share/keyrings/mongodb-server-${key_series}.gpg"
+      as_root gpg --dearmor -o "$keyring" "$pgp_tmp"
+      rm -f "$pgp_tmp"
+
+      # Step 2: Add apt repo and install packages.
+      repo_file="/etc/apt/sources.list.d/mongodb-org-${series}.list"
+      local apt_base_url="https://repo.mongodb.org/apt/${distro}"
+      if [[ -n "$mongo_apt_mirror" ]]; then
+        apt_base_url="${mongo_apt_mirror}/${distro}"
+        log "Using custom MongoDB apt mirror: ${apt_base_url}"
+      fi
+      repo_line="deb [ arch=amd64,arm64 signed-by=${keyring} ] ${apt_base_url} ${codename}/mongodb-org/${series} ${component}"
+      log "Mongo apt target: distro=${distro} codename=${codename} series=${series} key=${key_series}"
+      printf "%s\n" "$repo_line" | as_root tee "$repo_file" >/dev/null
+
+      # Capture update output to detect 403 geo-block
+      as_root apt-get update -y > /tmp/felfel-apt-upd.log 2>&1 || true
+      if grep -q "403\|Forbidden\|Failed to fetch.*mongodb" /tmp/felfel-apt-upd.log 2>/dev/null; then
+        rm -f /tmp/felfel-apt-upd.log
+        warn "MongoDB apt repo is blocked (HTTP 403 / Forbidden)."
+        warn "Trying direct binary tarball install..."
+        as_root rm -f "$repo_file"
+        if _install_mongodb_deb_direct "$series" "$codename" "$distro"; then
+          return 0
+        fi
+        err "Both apt repo and direct binary install failed."
+        err "  Set FELFEL_MONGODB_MIRROR=<local-mirror> and rerun, or"
+        err "  install MongoDB manually and set FELFEL_MONGODB_SKIP_INSTALL=1."
+        exit 1
+      fi
+      rm -f /tmp/felfel-apt-upd.log
+
+      if ! as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+           mongodb-org mongodb-mongosh mongodb-database-tools; then
+        warn "Full mongodb-org install failed. Trying minimal set..."
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y mongodb-org || {
+          warn "mongodb-org apt install failed. Trying binary tarball fallback..."
+          as_root rm -f "$repo_file"
+          _install_mongodb_deb_direct "$series" "$codename" "$distro" || exit 1
+          return 0
+        }
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          mongodb-mongosh mongodb-database-tools || true
+      fi
+      ;;
+    dnf|yum)
+      local mongo_rpm_mirror="${FELFEL_MONGODB_MIRROR:-}"
+      local gpg_key_url="https://pgp.mongodb.com/server-${series}.asc"
+      [[ -z "${FELFEL_MONGODB_PGP_MIRROR:-}" ]] || \
+        gpg_key_url="${FELFEL_MONGODB_PGP_MIRROR}/server-${series}.asc"
+      local rpm_baseurl="https://repo.mongodb.org/yum/redhat/\$releasever/mongodb-org/${series}/x86_64/"
+      if [[ -n "$mongo_rpm_mirror" ]]; then
+        rpm_baseurl="${mongo_rpm_mirror}/yum/redhat/\$releasever/mongodb-org/${series}/x86_64/"
+        log "Using custom MongoDB rpm mirror: ${mongo_rpm_mirror}"
+      fi
+      repo_file="/etc/yum.repos.d/mongodb-org-${series}.repo"
+      as_root bash -lc "cat > '$repo_file' <<'RPMEOF'
+[mongodb-org-${series}]
+name=MongoDB Repository
+baseurl=${rpm_baseurl}
+gpgcheck=1
+enabled=1
+gpgkey=${gpg_key_url}
+RPMEOF"
+      if [[ "$mgr" == "dnf" ]]; then
+        as_root dnf install -y mongodb-org mongodb-mongosh mongodb-database-tools
+      else
+        as_root yum install -y mongodb-org mongodb-mongosh mongodb-database-tools
+      fi
+      ;;
+    *)
+      err "Automatic MongoDB install is supported on apt/dnf/yum only."
+      err "Install mongod and mongosh manually, set FELFEL_MONGODB_SKIP_INSTALL=1, then rerun."
+      exit 1
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------
+# _install_mongodb_deb_direct: install MongoDB from a prebuilt binary
+# tarball when the official apt/yum repository is inaccessible.
+#
+# Downloads from fastdl.mongodb.org (different CDN than repo.mongodb.org)
+# or from FELFEL_MONGODB_DEB_MIRROR.
+#
+# Env vars (all optional):
+#   FELFEL_MONGODB_DEB_MIRROR  – base URL serving MongoDB tarball files
+#                                 (default: https://fastdl.mongodb.org)
+#   FELFEL_MONGODB_VERSION      – exact version, e.g. "8.0.5"
+# ------------------------------------------------------------------
+_install_mongodb_deb_direct() {
+  local series="${1:-8.0}"
+  local codename="${2:-jammy}"
+  local _distro="${3:-ubuntu}"
+
+  local deb_mirror="${FELFEL_MONGODB_DEB_MIRROR:-}"
+  local version="${FELFEL_MONGODB_VERSION:-}"
+
+  local default_version
+  case "$series" in
+    "8.0"|"8.2") default_version="8.0.5"  ;;
+    "7.0")       default_version="7.0.15" ;;
+    "6.0")       default_version="6.0.19" ;;
+    *)           default_version="8.0.5"  ;;
+  esac
+  [[ -n "$version" ]] || version="$default_version"
+
+  local arch
+  arch="$(dpkg --print-architecture 2>/dev/null || echo "amd64")"
+
+  local os_string
+  case "$codename" in
+    noble)    os_string="ubuntu2404" ;;
+    jammy)    os_string="ubuntu2204" ;;
+    focal)    os_string="ubuntu2004" ;;
+    bionic)   os_string="ubuntu1804" ;;
+    bookworm) os_string="debian12"   ;;
+    bullseye) os_string="debian11"   ;;
+    buster)   os_string="debian10"   ;;
+    *)        os_string="ubuntu2204" ;;
+  esac
+
+  log "Attempting direct binary tarball: MongoDB ${version} for ${os_string}/${arch}..."
+
+  local base_dl="${deb_mirror:-https://fastdl.mongodb.org}"
+  local tgz_url="${base_dl}/linux/mongodb-linux-${arch}-${os_string}-${version}.tgz"
+  local tgz_path="/tmp/felfel-mongo.tgz"
+  local extract_dir="/tmp/felfel-mongo-extract"
+
+  if ! curl -fL --max-time 180 --retry 3 --retry-delay 5 --connect-timeout 30 \
+       "$tgz_url" -o "$tgz_path" 2>/dev/null; then
+    err "Binary tarball download failed: ${tgz_url}"
+    return 1
+  fi
+
+  rm -rf "$extract_dir"; mkdir -p "$extract_dir"
+  if ! tar -xzf "$tgz_path" --strip-components=1 -C "$extract_dir" 2>/dev/null; then
+    err "Failed to extract MongoDB tarball."; rm -f "$tgz_path"; return 1
+  fi
+  rm -f "$tgz_path"
+
+  for bin in mongod mongos; do
+    [[ -f "${extract_dir}/bin/${bin}" ]] || continue
+    as_root cp "${extract_dir}/bin/${bin}" /usr/local/bin/
+    as_root chmod +x "/usr/local/bin/${bin}"
+  done
+  rm -rf "$extract_dir"
+
+  # Try to get mongosh separately
+  if ! command -v mongosh >/dev/null 2>&1; then
+    local mongosh_base="${FELFEL_MONGODB_DEB_MIRROR:-https://downloads.mongodb.com}"
+    local mongosh_url="${mongosh_base}/compass/mongosh-2.3.0-linux-${arch}.tgz"
+    if curl -fL --max-time 120 --retry 2 --connect-timeout 30 \
+         "$mongosh_url" -o /tmp/felfel-mongosh.tgz 2>/dev/null; then
+      mkdir -p /tmp/felfel-mongosh-x
+      tar -xzf /tmp/felfel-mongosh.tgz --strip-components=1 -C /tmp/felfel-mongosh-x 2>/dev/null || true
+      if [[ -f "/tmp/felfel-mongosh-x/bin/mongosh" ]]; then
+        as_root cp /tmp/felfel-mongosh-x/bin/mongosh /usr/local/bin/mongosh
+        as_root chmod +x /usr/local/bin/mongosh
+      fi
+      rm -rf /tmp/felfel-mongosh.tgz /tmp/felfel-mongosh-x
+    fi
+  fi
+
+  command -v mongod >/dev/null 2>&1 || { err "mongod not found after tarball install."; return 1; }
+  ok "MongoDB installed from tarball: $(mongod --version 2>/dev/null | head -1 || echo 'ok')"
+
+  # System setup: user, dirs, config, systemd unit
+  id mongod >/dev/null 2>&1 || as_root useradd --system --no-create-home --shell /bin/false mongod 2>/dev/null || true
+  as_root mkdir -p /var/lib/mongodb /var/log/mongodb /var/run/mongodb
+  as_root chown -R mongod:mongod /var/lib/mongodb /var/log/mongodb /var/run/mongodb 2>/dev/null || true
+
+  if [[ ! -f /etc/mongod.conf ]]; then
+    cat > /tmp/felfel-mongod.conf <<'MONGOD_CONF'
+storage:
+  dbPath: /var/lib/mongodb
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+net:
+  port: 27017
+  bindIp: 127.0.0.1
+processManagement:
+  pidFilePath: /var/run/mongodb/mongod.pid
+  timeZoneInfo: /usr/share/zoneinfo
+MONGOD_CONF
+    as_root mv /tmp/felfel-mongod.conf /etc/mongod.conf
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && \
+     ! systemctl list-unit-files 2>/dev/null | grep -q '^mongod\.service'; then
+    cat > /tmp/felfel-mongod.service <<'MONGOD_UNIT'
+[Unit]
+Description=MongoDB Database Server
+After=network.target
+
+[Service]
+User=mongod
+Group=mongod
+ExecStart=/usr/local/bin/mongod --config /etc/mongod.conf
+ExecStartPre=/bin/mkdir -p /var/run/mongodb
+ExecStartPre=+/bin/chown mongod:mongod /var/run/mongodb
+LimitNOFILE=64000
+TasksMax=32768
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+MONGOD_UNIT
+    as_root mv /tmp/felfel-mongod.service /etc/systemd/system/mongod.service
+    as_root systemctl daemon-reload 2>/dev/null || true
+  fi
+  return 0
+}
+
+ensure_mongodb_service_running() {
+  local service_name
+  service_name="mongod"
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files | grep -q '^mongod\.service'; then
+      service_name="mongod"
+    elif systemctl list-unit-files | grep -q '^mongodb\.service'; then
+      service_name="mongodb"
+    fi
+    as_root systemctl daemon-reload >/dev/null 2>&1 || true
+    as_root systemctl enable --now "${service_name}.service" >/dev/null 2>&1 || as_root systemctl restart "${service_name}.service" >/dev/null 2>&1 || true
+    return
+  fi
+  as_root service mongod start >/dev/null 2>&1 || as_root service mongodb start >/dev/null 2>&1 || true
+}
+
+wait_for_mongodb() {
+  local attempts
+  attempts=30
+  while (( attempts > 0 )); do
+    if command -v mongosh >/dev/null 2>&1 && mongosh --quiet --eval "db.adminCommand({ ping: 1 }).ok" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    attempts=$((attempts - 1))
+  done
+  return 1
+}
+
+ensure_mongodb_replica_set() {
+  local repl_set service_name conf_file host_value initiated attempts
+  repl_set="${FELFEL_MONGODB_REPLICA_SET:-rs0}"
+  conf_file="/etc/mongod.conf"
+  if [[ -f "$conf_file" ]]; then
+    if grep -Eq '^[[:space:]]*replication:[[:space:]]*$' "$conf_file"; then
+      if grep -Eq '^[[:space:]]*replSetName:[[:space:]]*' "$conf_file"; then
+        if ! grep -Eq "^[[:space:]]*replSetName:[[:space:]]*${repl_set}[[:space:]]*$" "$conf_file"; then
+          if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+            sed -i -E "s|^([[:space:]]*replSetName:[[:space:]]*).*$|\\1${repl_set}|g" "$conf_file"
+          else
+            sudo sed -i -E "s|^([[:space:]]*replSetName:[[:space:]]*).*$|\\1${repl_set}|g" "$conf_file"
+          fi
+        fi
+      else
+        if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+          sed -i "/^[[:space:]]*replication:[[:space:]]*$/a\\  replSetName: ${repl_set}" "$conf_file"
+        else
+          sudo sed -i "/^[[:space:]]*replication:[[:space:]]*$/a\\  replSetName: ${repl_set}" "$conf_file"
+        fi
+      fi
     else
-        echo "--listen-v6"
+      if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        printf "\nreplication:\n  replSetName: %s\n" "$repl_set" >>"$conf_file"
+      else
+        printf "\nreplication:\n  replSetName: %s\n" "$repl_set" | sudo tee -a "$conf_file" >/dev/null
+      fi
     fi
+  fi
+
+  service_name="mongod"
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files | grep -q '^mongod\.service'; then
+      service_name="mongod"
+    elif systemctl list-unit-files | grep -q '^mongodb\.service'; then
+      service_name="mongodb"
+    fi
+    as_root systemctl restart "${service_name}.service" >/dev/null 2>&1 || true
+  fi
+
+  if ! wait_for_mongodb; then
+    return 1
+  fi
+
+  initiated="0"
+  if mongosh --quiet --eval "const s=rs.status(); if (s.ok===1) quit(0); quit(1);" >/dev/null 2>&1; then
+    initiated="1"
+  fi
+  if [[ "$initiated" != "1" ]]; then
+    host_value="$(mongosh --quiet --eval "const h=db.hello(); print(h.me || h.primary || '127.0.0.1:27017')" 2>/dev/null | tail -n1 | tr -d '\r')"
+    if [[ -z "$host_value" ]]; then
+      host_value="127.0.0.1:27017"
+    fi
+    mongosh --quiet --eval "rs.initiate({_id:'${repl_set}',members:[{_id:0,host:'${host_value}'}]})" >/dev/null 2>&1 || true
+  fi
+
+  attempts=45
+  while (( attempts > 0 )); do
+    if mongosh --quiet --eval "const s=rs.status(); if (s.ok===1 && (s.myState===1 || s.members.some(m => m.stateStr === 'PRIMARY'))) quit(0); quit(1);" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    attempts=$((attempts - 1))
+  done
+  return 1
 }
 
-# Port helpers
-is_port_in_use() {
-    local port="$1"
-    if command -v ss > /dev/null 2>&1; then
-        ss -ltn 2> /dev/null | awk -v p=":${port}$" '$4 ~ p {exit 0} END {exit 1}'
-        return
+ensure_mongodb() {
+  # Only require mongod and mongosh; mongodump/mongorestore are optional
+  # (the binary tarball fallback on geo-blocked networks does not include them).
+  if ! command -v mongod >/dev/null 2>&1 || ! command -v mongosh >/dev/null 2>&1; then
+    log "Installing MongoDB server and tools..."
+    ensure_mongodb_packages
+  fi
+  ensure_mongodb_service_running
+  if ! ensure_mongodb_replica_set; then
+    err "MongoDB replica set is not ready."
+    err "Check with: mongosh --quiet --eval 'rs.status()'"
+    exit 1
+  fi
+  if ! wait_for_mongodb; then
+    err "MongoDB service is not ready."
+    err "Check service logs with: journalctl -u mongod -n 200 --no-pager"
+    exit 1
+  fi
+}
+
+pause() {
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    read -r -p "Press Enter to continue..."
+  fi
+}
+
+line() {
+  local width char
+  width="${1:-62}"
+  char="${2:--}"
+  printf '%*s\n' "$width" '' | tr ' ' "$char"
+}
+
+status_badge() {
+  case "$1" in
+    RUNNING) printf "%bRUNNING%b" "$COLOR_GREEN" "$COLOR_RESET" ;;
+    STOPPED) printf "%bSTOPPED%b" "$COLOR_RED" "$COLOR_RESET" ;;
+    *) printf "%b%s%b" "$COLOR_YELLOW" "$1" "$COLOR_RESET" ;;
+  esac
+}
+
+runtime_mode() {
+  if [[ "$(runtime_controller)" == "systemd" ]]; then
+    echo "systemd"
+  else
+    echo "fallback"
+  fi
+}
+
+runtime_controller() {
+  if has_systemd_service; then
+    if [[ "$USE_SYSTEMD" == "1" ]]; then
+      echo "systemd"
+      return
     fi
-    if command -v netstat > /dev/null 2>&1; then
-        netstat -lnt 2> /dev/null | awk -v p=":${port} " '$4 ~ p {exit 0} END {exit 1}'
-        return
+    if systemctl is-active --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
+      echo "systemd"
+      return
     fi
-    if command -v lsof > /dev/null 2>&1; then
-        lsof -nP -iTCP:${port} -sTCP:LISTEN > /dev/null 2>&1 && return 0
+    if systemctl is-enabled --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
+      echo "systemd"
+      return
+    fi
+  fi
+  echo "fallback"
+}
+
+runtime_status() {
+  if [[ "$(runtime_controller)" == "systemd" ]]; then
+    if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+      echo "RUNNING"
+    else
+      echo "STOPPED"
+    fi
+    return
+  fi
+  if is_running_fallback; then
+    echo "RUNNING"
+  else
+    echo "STOPPED"
+  fi
+}
+
+last_record_or_dash() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    cat "$file"
+  else
+    echo "-"
+  fi
+}
+
+header() {
+  if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
+    clear || true
+  fi
+  local mode status port origin
+  mode="$(runtime_mode)"
+  status="$(runtime_status)"
+  port="$(load_env_value PORT)"; [[ -n "$port" ]] || port="-"
+  origin="$(load_env_value APP_ORIGIN)"; [[ -n "$origin" ]] || origin="-"
+
+  printf "%b" "$COLOR_CYAN"
+  line 62 "="
+  printf "%b%s%b\n" "$COLOR_BOLD" " FELFEL SERVER MANAGER " "$COLOR_RESET"
+  line 62 "="
+  printf "%b" "$COLOR_RESET"
+  printf " App       : %s\n" "$APP_NAME"
+  printf " Version   : %s\n" "$SCRIPT_VERSION"
+  printf " Mode      : %s\n" "$mode"
+  printf " Status    : %s\n" "$(status_badge "$status")"
+  printf " Port      : %s\n" "$port"
+  printf " Origin    : %s\n" "$origin"
+  if [[ -n "$APP_DIR" ]]; then
+    printf " App Dir   : %s\n" "$APP_DIR"
+  fi
+  printf " Last Deploy: %s\n" "$(last_record_or_dash "$LAST_DEPLOY_FILE")"
+  printf " Last Backup: %s\n" "$(last_record_or_dash "$LAST_BACKUP_FILE")"
+  printf "\n"
+}
+
+random_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+  else
+    head -c 32 /dev/urandom | xxd -p -c 256
+  fi
+}
+
+set_paths() {
+  ENV_FILE="${APP_DIR}/.env"
+  PID_FILE="${APP_DIR}/.felfelchat.pid"
+  LOG_DIR="${APP_DIR}/logs"
+  OUT_LOG="${LOG_DIR}/server.out.log"
+  ERR_LOG="${LOG_DIR}/server.err.log"
+  BACKUP_DIR="${APP_DIR}/backups"
+  LAST_DEPLOY_FILE="${APP_DIR}/.felfel.last-deploy"
+  LAST_BACKUP_FILE="${APP_DIR}/.felfel.last-backup"
+}
+
+save_config() {
+  mkdir -p "$CONFIG_DIR"
+  cat >"$CONFIG_FILE" <<EOF
+APP_DIR=${APP_DIR}
+SERVICE_NAME=${SERVICE_NAME}
+USE_SYSTEMD=${USE_SYSTEMD}
+EOF
+}
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+  fi
+}
+
+load_env_value() {
+  local key="$1"
+  if [[ -f "$ENV_FILE" ]]; then
+    grep -E "^${key}=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true
+  fi
+}
+
+strip_wrapping_quotes() {
+  local value="$1"
+  value="${value#\"}"
+  value="${value%\"}"
+  printf "%s" "$value"
+}
+
+resolve_database_url() {
+  local db_url repl_set
+  repl_set="${FELFEL_MONGODB_REPLICA_SET:-rs0}"
+  db_url="$(strip_wrapping_quotes "$(load_env_value DATABASE_URL)")"
+  db_url="${db_url//\\\"/\"}"
+  db_url="$(strip_wrapping_quotes "$db_url")"
+  db_url="$(printf "%s" "$db_url" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  if [[ "$db_url" =~ ^mongo:// ]]; then
+    db_url="mongodb://${db_url#mongo://}"
+  fi
+  if [[ -z "$db_url" ]] || [[ "$db_url" =~ ^file: ]]; then
+    db_url="mongodb://127.0.0.1:27017/felfelchat?replicaSet=${repl_set}&directConnection=true"
+  fi
+  if [[ ! "$db_url" =~ ^mongodb(\+srv)?:// ]]; then
+    db_url="mongodb://127.0.0.1:27017/felfelchat?replicaSet=${repl_set}&directConnection=true"
+  fi
+  if [[ "$db_url" =~ ^mongodb://(127\.0\.0\.1|localhost)(:[0-9]+)?/[^?]+$ ]]; then
+    db_url="${db_url}?replicaSet=${repl_set}&directConnection=true"
+  elif [[ "$db_url" =~ ^mongodb://(127\.0\.0\.1|localhost)(:[0-9]+)?/[^?]+\?.*$ ]]; then
+    if [[ "$db_url" != *"replicaSet="* ]]; then
+      db_url="${db_url}&replicaSet=${repl_set}"
+    fi
+    if [[ "$db_url" != *"directConnection="* ]]; then
+      db_url="${db_url}&directConnection=true"
+    fi
+  fi
+  printf "%s" "$db_url"
+}
+
+cleanup_legacy_sqlite_artifacts() {
+  rm -f "${APP_DIR}/prisma/dev.db" "${APP_DIR}/prisma/dev.db-journal" "${APP_DIR}/dev.db" "${APP_DIR}/dev.db-journal" 2>/dev/null || true
+  rm -rf "${APP_DIR}/prisma/migrations" 2>/dev/null || true
+}
+
+upsert_env() {
+  local key="$1"
+  local value="$2"
+  local escaped_value
+  escaped_value="$(printf "%s" "$value" | sed -e 's/[&|]/\\&/g')"
+  touch "$ENV_FILE"
+  if grep -qE "^${key}=" "$ENV_FILE"; then
+    sed -i "s|^${key}=.*|${key}=${escaped_value}|" "$ENV_FILE"
+  else
+    echo "${key}=${value}" >> "$ENV_FILE"
+  fi
+}
+
+default_install_dir() {
+  if [[ -w "/opt" ]]; then
+    echo "/opt/felfelchat"
+  else
+    echo "${HOME}/felfelchat"
+  fi
+}
+
+has_systemd_service() {
+  command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"
+}
+
+default_runtime_user() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]] && [[ -n "${SUDO_USER:-}" ]]; then
+    printf "%s" "$SUDO_USER"
+    return
+  fi
+  id -un
+}
+
+detect_service_user() {
+  local service_user=""
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"; then
+    service_user="$(systemctl show -p User --value "${SERVICE_NAME}.service" 2>/dev/null || true)"
+  fi
+  if [[ -z "$service_user" ]]; then
+    service_user="$(default_runtime_user)"
+  fi
+  printf "%s" "$service_user"
+}
+
+ensure_runtime_permissions() {
+  local runtime_user
+  runtime_user="$(detect_service_user)"
+  mkdir -p "$LOG_DIR" "$BACKUP_DIR" "${APP_DIR}/uploads"
+
+  if [[ -n "$runtime_user" ]]; then
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+      chown -R "${runtime_user}:${runtime_user}" "$LOG_DIR" "$BACKUP_DIR" "${APP_DIR}/uploads" 2>/dev/null || true
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo chown -R "${runtime_user}:${runtime_user}" "$LOG_DIR" "$BACKUP_DIR" "${APP_DIR}/uploads" 2>/dev/null || true
+    fi
+  fi
+}
+
+build_artifacts_ready() {
+  [[ -f "${APP_DIR}/.next/BUILD_ID" ]] && [[ -f "${APP_DIR}/.next/server/middleware-manifest.json" ]]
+}
+
+is_running_fallback() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+list_port_listener_pids() {
+  local target_port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :${target_port}" 2>/dev/null \
+      | awk -F'pid=' 'NR>1 && NF>1 {split($2,a,","); gsub(/[^0-9]/,"",a[1]); if(a[1]!="") print a[1]}' \
+      | sort -u
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -t -iTCP:"$target_port" -sTCP:LISTEN 2>/dev/null | sort -u
+    return 0
+  fi
+  return 1
+}
+
+port_has_listener() {
+  local target_port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "sport = :${target_port}" 2>/dev/null | awk 'NR>1 {found=1} END {exit found ? 0 : 1}'
+    return $?
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$target_port" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk -v port=":${target_port}" '$4 ~ port "$" {found=1} END {exit found ? 0 : 1}'
+    return $?
+  fi
+  return 1
+}
+
+pid_cmdline_preview() {
+  local pid="$1"
+  if [[ -r "/proc/${pid}/cmdline" ]]; then
+    tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null | cut -c1-140
+    return 0
+  fi
+  if command -v ps >/dev/null 2>&1; then
+    ps -p "$pid" -o args= 2>/dev/null | cut -c1-140
+    return 0
+  fi
+  return 1
+}
+
+pid_looks_like_app() {
+  local pid="$1"
+  local cmdline cwd
+  cmdline="$(pid_cmdline_preview "$pid" || true)"
+  cwd="$(readlink -f "/proc/${pid}/cwd" 2>/dev/null || true)"
+  [[ "$cmdline" == *node* ]] || return 1
+  if [[ -n "$cwd" && "$cwd" == "${APP_DIR}"* ]]; then
+    return 0
+  fi
+  if [[ "$cmdline" == *"${APP_DIR}"* ]] || [[ "$cmdline" == *"server.mjs"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+kill_pid_forcefully() {
+  local pid="$1"
+  kill "$pid" >/dev/null 2>&1 || { command -v sudo >/dev/null 2>&1 && sudo kill "$pid" >/dev/null 2>&1 || true; }
+  sleep 1
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -9 "$pid" >/dev/null 2>&1 || { command -v sudo >/dev/null 2>&1 && sudo kill -9 "$pid" >/dev/null 2>&1 || true; }
+  fi
+}
+
+ensure_port_available_for_app() {
+  local target_port="$1"
+  local service_pid pids remaining pid cmdline
+  [[ -n "$target_port" ]] || return 0
+  service_pid=""
+  if has_systemd_service; then
+    service_pid="$(systemctl show -p MainPID --value "${SERVICE_NAME}.service" 2>/dev/null || true)"
+  fi
+
+  mapfile -t pids < <(list_port_listener_pids "$target_port" || true)
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    if port_has_listener "$target_port"; then
+      err "Port ${target_port} is already in use, but the owner PID is not visible from this user."
+      err "Run manager with the same runtime user (or with sudo), or change PORT in .env."
+      return 1
+    fi
+    return 0
+  fi
+
+  for pid in "${pids[@]}"; do
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" != "0" ]] || continue
+    if [[ -n "$service_pid" && "$pid" == "$service_pid" ]]; then
+      continue
+    fi
+    if pid_looks_like_app "$pid"; then
+      if [[ ! -f "$PID_FILE" ]] || ! is_running_fallback; then
+        printf "%s" "$pid" >"$PID_FILE"
+      fi
+      return 0
+    fi
+  done
+
+  mapfile -t remaining < <(list_port_listener_pids "$target_port" || true)
+  if [[ ${#remaining[@]} -eq 0 ]] && ! port_has_listener "$target_port"; then
+    return 0
+  fi
+
+  local unresolved=()
+  for pid in "${remaining[@]}"; do
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" != "0" ]] || continue
+    if [[ -n "$service_pid" && "$pid" == "$service_pid" ]]; then
+      continue
+    fi
+    unresolved+=("$pid")
+  done
+
+  if [[ ${#unresolved[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  err "Port ${target_port} is already in use by another process."
+  for pid in "${unresolved[@]}"; do
+    cmdline="$(pid_cmdline_preview "$pid" || echo "unknown")"
+    err "PID ${pid}: ${cmdline}"
+  done
+  err "Stop conflicting process(es) or change PORT in .env before starting ${APP_NAME}."
+  return 1
+}
+
+clone_or_update_repo() {
+  ensure_base_tools
+  local repo="$1" ref="$2"
+  local primary_url fallback_url tar_url
+  if [[ "$repo" =~ ^https?:// ]] || [[ "$repo" =~ ^git@ ]]; then
+    primary_url="${FELFEL_REPO_URL:-$repo}"
+    fallback_url=""
+    tar_url="${FELFEL_TARBALL_URL:-}"
+  else
+    primary_url="${FELFEL_REPO_URL:-https://github.com/${repo}.git}"
+    fallback_url="https://ghproxy.com/https://github.com/${repo}.git"
+    tar_url="${FELFEL_TARBALL_URL:-https://codeload.github.com/${repo}/tar.gz/refs/heads/${ref}}"
+  fi
+  mkdir -p "$(dirname "$APP_DIR")"
+
+  export GIT_HTTP_VERSION=HTTP/1.1
+  export GIT_HTTP_LOW_SPEED_LIMIT=1000
+  export GIT_HTTP_LOW_SPEED_TIME=30
+
+  if [[ -d "$APP_DIR/.git" ]]; then
+    git -C "$APP_DIR" config core.fileMode false >/dev/null 2>&1 || true
+    log "Updating existing repository..."
+    git -C "$APP_DIR" remote set-url origin "$primary_url" || true
+    run_with_retries 3 git -C "$APP_DIR" fetch --all --tags || {
+      if [[ -n "$fallback_url" ]]; then
+        warn "Primary fetch failed. Trying remote fallback mirror..."
+        git -C "$APP_DIR" remote set-url origin "$fallback_url" || true
+        run_with_retries 3 git -C "$APP_DIR" fetch --all --tags || {
+          err "Could not update repository from network."
+          exit 1
+        }
+        git -C "$APP_DIR" remote set-url origin "$primary_url" || true
+      else
+        err "Could not update repository from network."
+        exit 1
+      fi
+    }
+    git -C "$APP_DIR" checkout "$ref" || true
+    run_with_retries 3 git -C "$APP_DIR" pull --ff-only || true
+  else
+    rm -rf "$APP_DIR"
+    if [[ -n "$tar_url" ]]; then
+      log "Downloading source snapshot..."
+      mkdir -p "$APP_DIR"
+      if run_with_retries 3 curl -4 -fL --retry 3 --retry-delay 2 --connect-timeout 20 "$tar_url" -o /tmp/felfel-src.tgz; then
+        tar -xzf /tmp/felfel-src.tgz --strip-components=1 -C "$APP_DIR"
+        rm -f /tmp/felfel-src.tgz
+        ok "Source downloaded from tarball"
+        return
+      fi
+      warn "Tarball download failed. Trying git clone..."
+      rm -rf "$APP_DIR"
+    fi
+
+    if run_with_retries 3 git clone --config http.version=HTTP/1.1 --branch "$ref" --depth 1 "$primary_url" "$APP_DIR"; then
+      return
+    fi
+    if [[ -n "$fallback_url" ]]; then
+      warn "Primary clone failed. Trying mirror clone..."
+      if run_with_retries 3 git clone --config http.version=HTTP/1.1 --branch "$ref" --depth 1 "$fallback_url" "$APP_DIR"; then
+        return
+      fi
+      if [[ -n "$tar_url" ]]; then
+        warn "Mirror clone failed. Trying mirror tarball fallback..."
+        rm -rf "$APP_DIR"
+        mkdir -p "$APP_DIR"
+        if run_with_retries 3 curl -4 -fL --retry 3 --retry-delay 2 --connect-timeout 20 "https://ghproxy.com/${tar_url}" -o /tmp/felfel-src.tgz; then
+          tar -xzf /tmp/felfel-src.tgz --strip-components=1 -C "$APP_DIR"
+          rm -f /tmp/felfel-src.tgz
+          ok "Source downloaded from mirror tarball fallback"
+          return
+        fi
+      fi
+    fi
+    err "Unable to download source code from configured repository."
+    err "Set FELFEL_REPO_URL to a reachable git URL and retry."
+    exit 1
+  fi
+  git -C "$APP_DIR" config core.fileMode false >/dev/null 2>&1 || true
+}
+
+setup_env_interactive() {
+  header
+  local default_port default_origin default_database_url port origin jwt_secret backup_signing_key sentry_dsn webrtc_turn_urls webrtc_turn_username webrtc_turn_credential turn_domain
+  ensure_mongodb
+
+  default_port="$(load_env_value PORT)"
+  [[ -n "$default_port" ]] || default_port="3000"
+  default_origin="$(load_env_value APP_ORIGIN)"
+  [[ -n "$default_origin" ]] || default_origin="http://felfel.example.com"
+  default_database_url="$(resolve_database_url)"
+
+  port="$(prompt_with_default "Port" "$default_port")"
+  origin="$(prompt_with_default "Public app origin" "$default_origin")"
+
+  jwt_secret="$(load_env_value JWT_SECRET)"
+  if [[ -z "$jwt_secret" ]]; then
+    jwt_secret="$(random_secret)"
+  fi
+
+  backup_signing_key="$(load_env_value BACKUP_SIGNING_KEY)"
+  if [[ -z "$backup_signing_key" ]]; then
+    backup_signing_key="$(random_secret)"
+  fi
+
+  sentry_dsn="$(load_env_value SENTRY_DSN)"
+  webrtc_turn_urls="$(load_env_value NEXT_PUBLIC_WEBRTC_TURN_URLS)"
+  webrtc_turn_username="$(load_env_value NEXT_PUBLIC_WEBRTC_TURN_USERNAME)"
+  webrtc_turn_credential="$(load_env_value NEXT_PUBLIC_WEBRTC_TURN_CREDENTIAL)"
+  if [[ -z "$webrtc_turn_urls" ]]; then
+    webrtc_turn_urls="${FELFEL_WEBRTC_TURN_URLS:-}"
+  fi
+  if [[ -z "$webrtc_turn_username" ]]; then
+    webrtc_turn_username="${FELFEL_WEBRTC_TURN_USERNAME:-}"
+  fi
+  if [[ -z "$webrtc_turn_credential" ]]; then
+    webrtc_turn_credential="${FELFEL_WEBRTC_TURN_CREDENTIAL:-}"
+  fi
+  turn_domain="$(extract_domain_from_origin "$origin")"
+  if [[ -n "$turn_domain" ]]; then
+    webrtc_turn_urls="$(build_turn_urls_for_domain "$turn_domain")"
+  fi
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    webrtc_turn_username="$(prompt_with_default "WebRTC TURN username" "${webrtc_turn_username:-}")"
+    webrtc_turn_credential="$(prompt_with_default "WebRTC TURN credential" "${webrtc_turn_credential:-}")"
+  fi
+  if [[ -n "$turn_domain" && -n "$webrtc_turn_username" && -n "$webrtc_turn_credential" ]]; then
+    if command -v turnadmin >/dev/null 2>&1; then
+      if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        turnadmin -a -u "$webrtc_turn_username" -r "$turn_domain" -p "$webrtc_turn_credential" >/dev/null 2>&1 || warn "Failed to create TURN user with turnadmin"
+      elif command -v sudo >/dev/null 2>&1; then
+        sudo turnadmin -a -u "$webrtc_turn_username" -r "$turn_domain" -p "$webrtc_turn_credential" >/dev/null 2>&1 || warn "Failed to create TURN user with turnadmin"
+      else
+        warn "turnadmin found but sudo/root not available; TURN user was not created"
+      fi
+    fi
+  fi
+
+  upsert_env "NODE_ENV" "production"
+  upsert_env "PORT" "$port"
+  upsert_env "APP_ORIGIN" "$origin"
+  upsert_env "JWT_SECRET" "$jwt_secret"
+  upsert_env "BACKUP_SIGNING_KEY" "$backup_signing_key"
+  upsert_env "DATABASE_URL" "$default_database_url"
+  upsert_env "UPLOAD_DIR" "./uploads"
+  upsert_env "UPLOAD_MAX_SIZE_MB" "5"
+  upsert_env "BACKUP_DIR" "./backups"
+  upsert_env "AUDIT_LOG_DIR" "./logs"
+  upsert_env "SENTRY_DSN" "${sentry_dsn:-}"
+  upsert_env "SENTRY_TRACES_SAMPLE_RATE" "0.1"
+  upsert_env "NEXT_PUBLIC_WEBRTC_TURN_URLS" "${webrtc_turn_urls:-}"
+  upsert_env "NEXT_PUBLIC_WEBRTC_TURN_USERNAME" "${webrtc_turn_username:-}"
+  upsert_env "NEXT_PUBLIC_WEBRTC_TURN_CREDENTIAL" "${webrtc_turn_credential:-}"
+
+  mkdir -p "$LOG_DIR" "$BACKUP_DIR" "${APP_DIR}/uploads"
+  ensure_runtime_permissions
+  ok ".env configured"
+}
+
+# ------------------------------------------------------------------
+# ensure_swap: On low-RAM servers (< 2GB), npm ci and Next.js build
+# will be killed by the OOM killer. This creates a temporary swap
+# file to provide the needed headroom.
+# ------------------------------------------------------------------
+ensure_swap() {
+  # Only on Linux
+  [[ -f /proc/meminfo ]] || return 0
+
+  local total_ram_kb swap_total_kb
+  total_ram_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  swap_total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
+
+  # If total RAM + existing swap >= 2GB, no action needed
+  local total_available=$(( (total_ram_kb + swap_total_kb) / 1024 ))
+  if (( total_available >= 2048 )); then
+    return 0
+  fi
+
+  log "Low memory detected (${total_ram_kb}KB RAM, ${swap_total_kb}KB swap). Creating swap..."
+  local swap_file="/swapfile"
+  if [[ -f "$swap_file" ]] && swapon --show | grep -q "$swap_file"; then
+    log "Swap file already active."
+    return 0
+  fi
+
+  # Create 2GB swap file
+  as_root dd if=/dev/zero of="$swap_file" bs=1M count=2048 status=progress 2>/dev/null || \
+    as_root fallocate -l 2G "$swap_file" 2>/dev/null || {
+      warn "Could not create swap file. npm ci may fail on low-RAM servers."
+      return 0
+    }
+  as_root chmod 600 "$swap_file"
+  as_root mkswap "$swap_file" >/dev/null 2>&1
+  as_root swapon "$swap_file" 2>/dev/null || {
+    warn "Could not activate swap. npm ci may fail on low-RAM servers."
+    return 0
+  }
+  ok "Swap file created and activated (2GB)"
+}
+
+install_dependencies() {
+  ensure_node_toolchain
+  ensure_swap
+  log "Installing dependencies..."
+  (cd "$APP_DIR" && NODE_OPTIONS="--max-old-space-size=768" npm ci)
+  ok "Dependencies installed"
+}
+
+run_migrations() {
+  ensure_node_toolchain
+  ensure_mongodb
+  upsert_env "DATABASE_URL" "$(resolve_database_url)"
+  cleanup_legacy_sqlite_artifacts
+  ensure_runtime_permissions
+  log "Syncing Prisma schema..."
+  if command -v npx >/dev/null 2>&1; then
+    (cd "$APP_DIR" && npx prisma db push --accept-data-loss && npx prisma generate)
+  else
+    (cd "$APP_DIR" && npm exec -- prisma db push --accept-data-loss && npm exec -- prisma generate)
+  fi
+  ensure_runtime_permissions
+  ok "Database sync complete"
+}
+
+build_app() {
+  ensure_node_toolchain
+  ensure_swap
+  log "Building application..."
+  (cd "$APP_DIR" && NODE_OPTIONS="--max-old-space-size=768" npm run build)
+  ok "Build complete"
+}
+
+install_systemd_service() {
+  command -v systemctl >/dev/null 2>&1 || { warn "systemd not found, fallback mode enabled."; USE_SYSTEMD="0"; return; }
+  [[ "$USE_SYSTEMD" == "1" ]] || return
+
+  local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+  local unit_tmp="/tmp/${SERVICE_NAME}.service"
+  local user_name
+  user_name="$(default_runtime_user)"
+
+  cat >"$unit_tmp" <<EOF
+[Unit]
+Description=FelFel Chat
+After=network.target
+
+[Service]
+Type=simple
+User=${user_name}
+WorkingDirectory=${APP_DIR}
+EnvironmentFile=${ENV_FILE}
+ExecStart=/usr/bin/env bash -lc 'cd ${APP_DIR} && npm run start'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  log "Installing systemd service ${SERVICE_NAME}..."
+  if [[ -w "/etc/systemd/system" ]]; then
+    mv "$unit_tmp" "$service_file"
+    systemctl daemon-reload
+    systemctl enable --now "${SERVICE_NAME}.service"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo mv "$unit_tmp" "$service_file"
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now "${SERVICE_NAME}.service"
+  else
+    warn "No permission for systemd install. Using fallback mode."
+    USE_SYSTEMD="0"
+  fi
+}
+
+start_server() {
+  ensure_node_toolchain
+  ensure_runtime_permissions
+  local port
+  port="$(load_env_value PORT)"
+  [[ -n "$port" ]] || port="3000"
+
+  # Stop any running instances first (prevents orphaned processes accumulating)
+  if [[ "$(runtime_controller)" != "systemd" ]]; then
+    stop_server 2>/dev/null || true
+  fi
+
+  ensure_port_available_for_app "$port" || return 1
+  if ! build_artifacts_ready; then
+    warn "Build artifacts missing (.next). Running build..."
+    build_app
+  fi
+  if [[ "$(runtime_controller)" == "systemd" ]]; then
+    if command -v sudo >/dev/null 2>&1; then sudo systemctl start "${SERVICE_NAME}.service"; else systemctl start "${SERVICE_NAME}.service"; fi
+    ok "Service started via systemd"
+    return
+  fi
+
+  mkdir -p "$LOG_DIR"
+  (cd "$APP_DIR" && nohup env NODE_ENV=production node server.mjs >>"$OUT_LOG" 2>>"$ERR_LOG" & echo $! > "$PID_FILE")
+  sleep 1
+  if is_running_fallback; then
+    ok "Server started (PID $(cat "$PID_FILE"))"
+  else
+    err "Failed to start fallback server"
+  fi
+}
+
+stop_server() {
+  if [[ "$(runtime_controller)" == "systemd" ]]; then
+    if command -v sudo >/dev/null 2>&1; then sudo systemctl stop "${SERVICE_NAME}.service"; else systemctl stop "${SERVICE_NAME}.service"; fi
+    ok "Service stopped via systemd"
+    return
+  fi
+
+  # Kill the tracked PID if present
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+  fi
+
+  # Also kill any orphaned app processes not tracked by the PID file
+  # (caused by multiple nohup starts without proper stop)
+  local orphan_pids
+  mapfile -t orphan_pids < <(
+    pgrep -f "node server\.mjs" 2>/dev/null | grep -v "^$$" || true
+    pgrep -f "npm run start" 2>/dev/null | grep -v "^$$" || true
+  )
+  if [[ ${#orphan_pids[@]} -gt 0 ]]; then
+    warn "Killing ${#orphan_pids[@]} orphaned app process(es)..."
+    for p in "${orphan_pids[@]}"; do
+      [[ -n "$p" ]] || continue
+      kill "$p" 2>/dev/null || true
+    done
+    sleep 1
+    for p in "${orphan_pids[@]}"; do
+      [[ -n "$p" ]] || continue
+      kill -0 "$p" >/dev/null 2>&1 && kill -9 "$p" 2>/dev/null || true
+    done
+  fi
+
+  ok "Server stopped"
+}
+
+restart_server() {
+  stop_server
+  start_server
+}
+
+show_status() {
+  header
+  local mode status
+  mode="$(runtime_mode)"
+  status="$(runtime_status)"
+  echo "Overview"
+  line 62 "-"
+  echo "Mode      : $mode"
+  echo "Status    : $(status_badge "$status")"
+  if [[ "$mode" == "systemd" ]]; then
+    echo "Service   : ${SERVICE_NAME}.service"
+  else
+    if is_running_fallback; then
+      echo "PID       : $(cat "$PID_FILE")"
+    else
+      echo "PID       : -"
+    fi
+  fi
+  echo "Port      : $(load_env_value PORT)"
+  echo "Origin    : $(load_env_value APP_ORIGIN)"
+  echo "Health URL: $(load_env_value APP_ORIGIN)/api/health"
+  echo "Ready URL : $(load_env_value APP_ORIGIN)/api/ready"
+  echo "Path      : $APP_DIR"
+  line 62 "-"
+  pause
+}
+
+tail_logs() {
+  header
+  if [[ "$(runtime_controller)" == "systemd" ]]; then
+    echo "Streaming systemd logs. Ctrl+C to return."
+    if command -v sudo >/dev/null 2>&1; then sudo journalctl -u "${SERVICE_NAME}.service" -f; else journalctl -u "${SERVICE_NAME}.service" -f; fi
+    return
+  fi
+  mkdir -p "$LOG_DIR"
+  touch "$OUT_LOG" "$ERR_LOG"
+  echo "Streaming fallback logs. Ctrl+C to return."
+  tail -f "$OUT_LOG" "$ERR_LOG"
+}
+
+health_check() {
+  header
+  ensure_base_tools
+  local port health_url ready_url
+  port="$(load_env_value PORT)"
+  [[ -n "$port" ]] || port="3000"
+  health_url="http://127.0.0.1:${port}/api/health"
+  ready_url="http://127.0.0.1:${port}/api/ready"
+  local health_code ready_code
+  health_code="$(curl -s -o /tmp/felfel-health.out -w "%{http_code}" "$health_url" || true)"
+  ready_code="$(curl -s -o /tmp/felfel-ready.out -w "%{http_code}" "$ready_url" || true)"
+  echo "Health endpoint: $health_url"
+  echo "HTTP code      : ${health_code:-n/a}"
+  cat /tmp/felfel-health.out 2>/dev/null || true
+  echo; echo
+  echo "Ready endpoint : $ready_url"
+  echo "HTTP code      : ${ready_code:-n/a}"
+  cat /tmp/felfel-ready.out 2>/dev/null || true
+  rm -f /tmp/felfel-health.out /tmp/felfel-ready.out
+  echo
+  pause
+}
+
+update_repo() {
+  ensure_base_tools
+  (cd "$APP_DIR" && git config core.fileMode false >/dev/null 2>&1 || true)
+  local dirty_files
+  dirty_files="$(cd "$APP_DIR" && git diff --name-only)"
+  if [[ "$dirty_files" == "install.sh" ]]; then
+    if (cd "$APP_DIR" && git diff --summary -- install.sh | grep -q "mode change"); then
+      warn "Detected mode-only local change on install.sh; resetting it before pull."
+      (cd "$APP_DIR" && git checkout -- install.sh)
+    fi
+  fi
+  log "Updating source code..."
+  (cd "$APP_DIR" && git fetch --all --tags && git pull --ff-only)
+  ok "Repository updated"
+}
+
+create_backup_manual() {
+  header
+  ensure_mongodb
+  mkdir -p "$BACKUP_DIR"
+  local ts file db_url
+  db_url="$(resolve_database_url)"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  file="$BACKUP_DIR/manual-${ts}.archive.gz"
+  if ! mongodump --uri="$db_url" --archive="$file" --gzip >/dev/null 2>&1; then
+    err "Manual backup failed. Ensure MongoDB tools are installed and DATABASE_URL is valid."
+    pause
+    return
+  fi
+  printf "%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" >"$LAST_BACKUP_FILE"
+  ok "Manual backup created: $file"
+  pause
+}
+
+restore_backup_manual() {
+  header
+  ensure_mongodb
+  local db_url
+  db_url="$(resolve_database_url)"
+  mapfile -t backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.archive.gz" -printf "%f\n" 2>/dev/null | sort -r)
+  if [[ ${#backups[@]} -eq 0 ]]; then
+    warn "No backups found in $BACKUP_DIR"
+    pause
+    return
+  fi
+
+  echo "Available backups:"
+  local i
+  for i in "${!backups[@]}"; do printf "  %d) %s\n" "$((i + 1))" "${backups[$i]}"; done
+  echo
+  read -r -p "Choose backup number: " choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#backups[@]} )); then
+    warn "Invalid selection"
+    pause
+    return
+  fi
+  local selected="$BACKUP_DIR/${backups[$((choice - 1))]}"
+  read -r -p "Type YES to overwrite current DB: " confirm
+  if [[ "$confirm" != "YES" ]]; then
+    warn "Cancelled"
+    pause
+    return
+  fi
+  stop_server
+  if ! mongorestore --uri="$db_url" --archive="$selected" --gzip --drop >/dev/null 2>&1; then
+    err "Restore failed. The backup may be invalid or MongoDB is unavailable."
+    pause
+    return
+  fi
+  ok "Backup restored: $selected"
+  read -r -p "Start server now? [Y/n]: " ans
+  if [[ "${ans:-Y}" =~ ^[Yy]$ ]]; then start_server; fi
+  pause
+}
+
+change_port_origin() {
+  header
+  local old_port old_origin new_port new_origin
+  old_port="$(load_env_value PORT)"; [[ -n "$old_port" ]] || old_port="3000"
+  old_origin="$(load_env_value APP_ORIGIN)"; [[ -n "$old_origin" ]] || old_origin="http://localhost:${old_port}"
+
+  read -r -p "New port [${old_port}]: " new_port
+  new_port="${new_port:-$old_port}"
+  read -r -p "New app origin [${old_origin}]: " new_origin
+  new_origin="${new_origin:-$old_origin}"
+
+  upsert_env "PORT" "$new_port"
+  upsert_env "APP_ORIGIN" "$new_origin"
+  ok "Port/origin updated"
+  read -r -p "Restart server now? [Y/n]: " ans
+  if [[ "${ans:-Y}" =~ ^[Yy]$ ]]; then restart_server; fi
+  pause
+}
+
+run_setup_wizard() {
+  setup_env_interactive
+  read -r -p "Install deps, sync DB, build and restart now? [Y/n]: " ans
+  if [[ "${ans:-Y}" =~ ^[Yy]$ ]]; then
+    install_dependencies
+    run_migrations
+    build_app
+    restart_server
+  fi
+  pause
+}
+
+full_deploy() {
+  header
+  update_repo
+  install_dependencies
+  run_migrations
+  build_app
+  restart_server
+  printf "%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" >"$LAST_DEPLOY_FILE"
+  ok "Full deploy completed"
+  pause
+}
+
+install_launcher() {
+  local launcher target
+  launcher="#!/usr/bin/env bash
+exec /usr/bin/env bash \"${APP_DIR}/install.sh\" tui \"\$@\""
+
+  if [[ -w "/usr/local/bin" ]]; then
+    target="/usr/local/bin/felfel"
+    printf "%s\n" "$launcher" >"$target"
+    chmod +x "$target"
+    ok "Installed launcher: $target"
+    return
+  fi
+
+  if command -v sudo >/dev/null 2>&1; then
+    target="/usr/local/bin/felfel"
+    printf "%s\n" "$launcher" | sudo tee "$target" >/dev/null
+    sudo chmod +x "$target"
+    ok "Installed launcher: $target"
+    return
+  fi
+
+  mkdir -p "${HOME}/.local/bin"
+  target="${HOME}/.local/bin/felfel"
+  printf "%s\n" "$launcher" >"$target"
+  chmod +x "$target"
+  ok "Installed launcher: $target"
+  if [[ ":$PATH:" != *":${HOME}/.local/bin:"* ]]; then
+    warn "~/.local/bin is not in PATH. Add it to your shell profile."
+  fi
+}
+
+remove_launcher() {
+  local removed="0"
+  if [[ -f "/usr/local/bin/felfel" ]]; then
+    if [[ -w "/usr/local/bin/felfel" ]]; then
+      rm -f "/usr/local/bin/felfel"
+    else
+      as_root rm -f "/usr/local/bin/felfel"
+    fi
+    removed="1"
+    ok "Removed launcher: /usr/local/bin/felfel"
+  fi
+  if [[ -f "${HOME}/.local/bin/felfel" ]]; then
+    rm -f "${HOME}/.local/bin/felfel"
+    removed="1"
+    ok "Removed launcher: ${HOME}/.local/bin/felfel"
+  fi
+  if [[ "$removed" == "0" ]]; then
+    warn "No felfel launcher found"
+  fi
+}
+
+superadmin_change_credentials() {
+  header
+  echo "Change Superadmin Credentials"
+  line 62 "-"
+  echo "This updates the superadmin account directly in MongoDB."
+  echo
+
+  if ! command -v mongosh >/dev/null 2>&1; then
+    err "mongosh not found. Cannot update credentials."
+    if [[ "$INTERACTIVE" == "1" ]]; then pause; fi
+    return 1
+  fi
+
+  local db_url db_name
+  db_url="$(load_env_value DATABASE_URL 2>/dev/null || true)"
+  if [[ -z "$db_url" ]]; then
+    db_url="$(grep -E '^DATABASE_URL=' "${APP_DIR}/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)"
+  fi
+  db_name="$(printf '%s' "$db_url" | sed -E 's|.*//[^/]+/([^?]+).*|\1|' || echo 'felfelchat')"
+  db_name="${db_name:-felfelchat}"
+
+  # Find the superadmin user
+  local sa_username
+  sa_username="$(mongosh --quiet "$db_url" --eval \
+    'const u = db.User.findOne({isSuperAdmin:true}); print(u ? u.username : "")' 2>/dev/null || true)"
+
+  if [[ -z "$sa_username" ]]; then
+    err "No superadmin user found in database: ${db_name}"
+    err "Check that the app was installed and the database seeded."
+    if [[ "$INTERACTIVE" == "1" ]]; then pause; fi
+    return 1
+  fi
+
+  ok "Found superadmin: ${sa_username}"
+  echo
+
+  local new_username new_password confirm_password new_displayname
+  read -r -p "New username (leave blank to keep '${sa_username}'): " new_username
+  read -r -p "New display name (leave blank to skip): " new_displayname
+  read -r -s -p "New password (leave blank to skip): " new_password; echo
+  if [[ -n "$new_password" ]]; then
+    if [[ ${#new_password} -lt 8 ]]; then
+      err "Password must be at least 8 characters."
+      if [[ "$INTERACTIVE" == "1" ]]; then pause; fi
+      return 1
+    fi
+    read -r -s -p "Confirm new password: " confirm_password; echo
+    if [[ "$new_password" != "$confirm_password" ]]; then
+      err "Passwords do not match."
+      if [[ "$INTERACTIVE" == "1" ]]; then pause; fi
+      return 1
+    fi
+  fi
+
+  if [[ -z "$new_username" && -z "$new_password" && -z "$new_displayname" ]]; then
+    warn "Nothing to update."
+    if [[ "$INTERACTIVE" == "1" ]]; then pause; fi
+    return 0
+  fi
+
+  # Build the update object with bcrypt hash
+  local js_update='const upd = {};'
+  if [[ -n "$new_username" ]]; then
+    js_update+="upd.username = '${new_username}';"
+  fi
+  if [[ -n "$new_displayname" ]]; then
+    js_update+="upd.displayName = '${new_displayname}';"
+  fi
+  if [[ -n "$new_password" ]]; then
+    # node bcrypt hash (mongosh does not have bcrypt; use node inline)
+    local hashed
+    hashed="$(node -e "const b=require('bcryptjs');b.hash('${new_password}',12).then(h=>console.log(h)).catch(()=>process.exit(1))" 2>/dev/null || true)"
+    if [[ -z "$hashed" ]]; then
+      err "Failed to hash password. Is bcryptjs available?"
+      if [[ "$INTERACTIVE" == "1" ]]; then pause; fi
+      return 1
+    fi
+    js_update+="upd.password = '${hashed}';"
+  fi
+
+  mongosh --quiet "$db_url" --eval "
+    ${js_update}
+    const res = db.User.updateOne({isSuperAdmin: true}, {'\$set': upd});
+    print(res.modifiedCount === 1 ? 'ok' : 'notfound');
+  " 2>/dev/null | grep -q "ok" \
+    && ok "Superadmin credentials updated successfully." \
+    || err "Update failed. Check mongosh connection and database name."
+
+  if [[ "$INTERACTIVE" == "1" ]]; then pause; fi
+}
+
+uninstall_app() {
+
+  header
+  echo "Uninstall ${APP_NAME}"
+  line 62 "-"
+  echo "This will remove the app, service, nginx config, launcher, and config files."
+  echo
+
+  local confirm keep_files wipe_db
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    read -r -p "Type UNINSTALL to continue: " confirm
+    if [[ "$confirm" != "UNINSTALL" ]]; then
+      warn "Cancelled"
+      pause
+      return
+    fi
+    read -r -p "Also DELETE the app directory (${APP_DIR})? [Y/n]: " keep_files
+    read -r -p "Also DROP the MongoDB database? WARNING: all chat data will be lost! [y/N]: " wipe_db
+  else
+    if [[ "${FELFEL_FORCE_UNINSTALL:-0}" != "1" ]]; then
+      err "Non-interactive uninstall requires FELFEL_FORCE_UNINSTALL=1"
+      exit 1
+    fi
+    keep_files="n"
+    wipe_db="${FELFEL_WIPE_DB:-n}"
+  fi
+
+  # ── 1. Stop and kill ALL running app processes ─────────────────────
+  if [[ "$(runtime_controller)" == "systemd" ]]; then
+    as_root systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
+    as_root systemctl disable "${SERVICE_NAME}.service" 2>/dev/null || true
+  fi
+
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$pid" ]]; then kill -9 "$pid" 2>/dev/null || true; fi
+    rm -f "$PID_FILE"
+  fi
+
+  local orphan_pids
+  mapfile -t orphan_pids < <(
+    pgrep -f "node server\.mjs" 2>/dev/null || true
+    pgrep -f "npm run start" 2>/dev/null | grep -v "^$$" || true
+  )
+  for p in "${orphan_pids[@]}"; do
+    [[ -n "$p" ]] || continue
+    kill -9 "$p" 2>/dev/null || true
+  done
+  ok "All app processes stopped"
+
+  # ── 2. Remove systemd service ─────────────────────────────────────
+  local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+  if [[ -f "$service_file" ]]; then
+    as_root rm -f "$service_file"
+    as_root systemctl daemon-reload 2>/dev/null || true
+    ok "Removed systemd service: ${SERVICE_NAME}.service"
+  fi
+
+  # ── 3. Remove nginx vhost ─────────────────────────────────────────
+  local nginx_removed="0"
+  for conf in \
+    "/etc/nginx/sites-available/felfelchat.conf" \
+    "/etc/nginx/sites-enabled/felfelchat.conf" \
+    "/etc/nginx/conf.d/felfelchat.conf"; do
+    if [[ -f "$conf" ]]; then
+      as_root rm -f "$conf"
+      nginx_removed="1"
+    fi
+  done
+  if [[ "$nginx_removed" == "1" ]]; then
+    as_root nginx -t 2>/dev/null && as_root systemctl reload nginx 2>/dev/null || true
+    ok "Removed nginx vhost config"
+  fi
+
+  # ── 4. Remove stale MongoDB apt repo files ────────────────────────
+  for f in /etc/apt/sources.list.d/mongodb-org-*.list; do
+    [[ -f "$f" ]] || continue
+    as_root rm -f "$f" 2>/dev/null || true
+  done
+
+  # ── 5. Optionally drop the MongoDB database ───────────────────────
+  if [[ "${wipe_db:-n}" =~ ^[Yy]$ ]]; then
+    if command -v mongosh >/dev/null 2>&1; then
+      local db_url db_name
+      db_url="$(load_env_value DATABASE_URL 2>/dev/null || true)"
+      db_name="$(printf '%s' "$db_url" | sed -E 's|.*//[^/]+/([^?]+).*|\1|' || echo 'felfelchat')"
+      db_name="${db_name:-felfelchat}"
+      mongosh --quiet "$db_name" --eval 'db.dropDatabase()' 2>/dev/null \
+        && ok "Dropped MongoDB database: ${db_name}" \
+        || warn "Could not drop MongoDB database (may not exist)"
+    else
+      warn "mongosh not found — skipping database drop"
+    fi
+  fi
+
+  # ── 6. Remove launcher, config ────────────────────────────────────
+  remove_launcher
+
+  if [[ -f "$CONFIG_FILE" ]]; then rm -f "$CONFIG_FILE"; fi
+  if [[ -d "$CONFIG_DIR" ]] && [[ -z "$(ls -A "$CONFIG_DIR" 2>/dev/null)" ]]; then
+    rmdir "$CONFIG_DIR" 2>/dev/null || true
+  fi
+  ok "Removed manager config"
+
+  # ── 7. Remove app directory (optional) ───────────────────────────
+  if [[ "${keep_files:-Y}" =~ ^[Nn]$ ]]; then
+    if [[ -n "$APP_DIR" && "$APP_DIR" != "/" && -d "$APP_DIR" ]]; then
+      rm -rf "$APP_DIR"
+      ok "Removed app directory: $APP_DIR"
+    else
+      warn "Skipped app directory removal (unsafe path or not found)"
+    fi
+  else
+    warn "Kept app directory: $APP_DIR"
+  fi
+
+  ok "Uninstall completed. All FelFel components removed."
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    pause
+  fi
+}
+
+ensure_nginx() {
+  if command -v nginx >/dev/null 2>&1; then
+    return
+  fi
+  log "nginx not found. Installing..."
+  local mgr
+  mgr="$(detect_pkg_manager)"
+  case "$mgr" in
+    apt) pkg_install "$mgr" nginx ;;
+    dnf|yum) pkg_install "$mgr" nginx ;;
+    apk) pkg_install "$mgr" nginx ;;
+    pacman) pkg_install "$mgr" nginx ;;
+    *)
+      warn "Cannot auto-install nginx. Install it manually and re-run."
+      return
+      ;;
+  esac
+  if command -v systemctl >/dev/null 2>&1; then
+    as_root systemctl enable --now nginx 2>/dev/null || true
+  fi
+  ok "nginx installed"
+}
+
+normalize_domain_input() {
+  local raw="$1"
+  raw="$(printf "%s" "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s#^https?://##; s#/.*$##; s/:.*$//')"
+  raw="${raw%.}"
+  printf "%s" "$raw"
+}
+
+build_turn_urls_for_domain() {
+  local domain="$1"
+  printf "turn:%s:3478?transport=udp,turn:%s:3478?transport=tcp,turns:%s:5349?transport=tcp" "$domain" "$domain" "$domain"
+}
+
+is_valid_domain() {
+  local domain="$1"
+  [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{0,62}$ ]]
+}
+
+extract_domain_from_origin() {
+  local origin="$1"
+  local extracted
+  extracted="$(normalize_domain_input "$origin")"
+  if is_valid_domain "$extracted"; then
+    printf "%s" "$extracted"
+  fi
+}
+
+resolve_nginx_paths() {
+  NGINX_VHOST_PATH=""
+  NGINX_ENABLE_PATH=""
+  NGINX_DEFAULT_PATH=""
+  local include_sites include_conf_d
+  include_sites="0"
+  include_conf_d="0"
+  if [[ -f "/etc/nginx/nginx.conf" ]]; then
+    if grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/sites-enabled/\*;.*$' /etc/nginx/nginx.conf; then
+      include_sites="1"
+    fi
+    if grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/conf\.d/\*\.conf;.*$' /etc/nginx/nginx.conf; then
+      include_conf_d="1"
+    fi
+  fi
+  if [[ "$include_sites" == "1" ]] && [[ -d "/etc/nginx/sites-available" ]] && [[ -d "/etc/nginx/sites-enabled" ]]; then
+    NGINX_VHOST_PATH="/etc/nginx/sites-available/felfelchat.conf"
+    NGINX_ENABLE_PATH="/etc/nginx/sites-enabled/felfelchat.conf"
+    NGINX_DEFAULT_PATH="/etc/nginx/sites-enabled/default"
+    return
+  fi
+  if [[ "$include_conf_d" == "1" ]]; then
+    NGINX_VHOST_PATH="/etc/nginx/conf.d/felfelchat.conf"
+    NGINX_ENABLE_PATH=""
+    if [[ -f "/etc/nginx/conf.d/default.conf" ]]; then
+      NGINX_DEFAULT_PATH="/etc/nginx/conf.d/default.conf"
+    fi
+    return
+  fi
+  if [[ -d "/etc/nginx/sites-available" ]] && [[ -d "/etc/nginx/sites-enabled" ]]; then
+    NGINX_VHOST_PATH="/etc/nginx/sites-available/felfelchat.conf"
+    NGINX_ENABLE_PATH="/etc/nginx/sites-enabled/felfelchat.conf"
+    NGINX_DEFAULT_PATH="/etc/nginx/sites-enabled/default"
+    return
+  fi
+  NGINX_VHOST_PATH="/etc/nginx/conf.d/felfelchat.conf"
+  NGINX_ENABLE_PATH=""
+  if [[ -f "/etc/nginx/conf.d/default.conf" ]]; then
+    NGINX_DEFAULT_PATH="/etc/nginx/conf.d/default.conf"
+  fi
+}
+
+write_file_with_optional_sudo() {
+  local source_path="$1"
+  local target_path="$2"
+  local target_dir
+  target_dir="$(dirname "$target_path")"
+  if mkdir -p "$target_dir" 2>/dev/null && cp "$source_path" "$target_path" 2>/dev/null; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo mkdir -p "$target_dir"
+    sudo cp "$source_path" "$target_path"
+    return 0
+  fi
+  return 1
+}
+
+link_file_with_optional_sudo() {
+  local source_path="$1"
+  local link_path="$2"
+  [[ -n "$link_path" ]] || return 0
+  if ln -sf "$source_path" "$link_path" 2>/dev/null; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo ln -sf "$source_path" "$link_path"
+    return 0
+  fi
+  return 1
+}
+
+remove_file_with_optional_sudo() {
+  local target_path="$1"
+  [[ -e "$target_path" ]] || return 0
+  if rm -f "$target_path" 2>/dev/null; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo rm -f "$target_path"
+    return 0
+  fi
+  return 1
+}
+
+reload_nginx_service() {
+  local use_sudo="$1"
+  if [[ "$use_sudo" == "1" ]]; then
+    sudo nginx -t >/dev/null 2>&1 || return 1
+    if command -v systemctl >/dev/null 2>&1; then
+      sudo systemctl reload nginx >/dev/null 2>&1 && return 0
+      sudo systemctl restart nginx >/dev/null 2>&1 && return 0
+    fi
+    if command -v service >/dev/null 2>&1; then
+      sudo service nginx reload >/dev/null 2>&1 && return 0
+      sudo service nginx restart >/dev/null 2>&1 && return 0
     fi
     return 1
+  fi
+  nginx -t >/dev/null 2>&1 || return 1
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload nginx >/dev/null 2>&1 && return 0
+    systemctl restart nginx >/dev/null 2>&1 && return 0
+  fi
+  if command -v service >/dev/null 2>&1; then
+    service nginx reload >/dev/null 2>&1 && return 0
+    service nginx restart >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
-install_base() {
-    case "${release}" in
-        ubuntu | debian | armbian)
-            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl
-            ;;
-        fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
-            dnf makecache -y && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl
-            ;;
-        centos)
-            if [[ "${VERSION_ID}" =~ ^7 ]]; then
-                yum makecache -y && yum install -y cronie curl tar tzdata socat ca-certificates openssl
-            else
-                dnf makecache -y && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl
-            fi
-            ;;
-        arch | manjaro | parch)
-            pacman -Sy --noconfirm cronie curl tar tzdata socat ca-certificates openssl
-            ;;
-        opensuse-tumbleweed | opensuse-leap)
-            zypper refresh && zypper -q install -y cron curl tar timezone socat ca-certificates openssl
-            ;;
-        alpine)
-            apk update && apk add dcron curl tar tzdata socat ca-certificates openssl
-            ;;
-        *)
-            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl
-            ;;
-    esac
+ensure_certbot_webroot() {
+  local use_sudo="$1"
+  if [[ "$use_sudo" == "1" ]]; then
+    sudo mkdir -p "/var/www/certbot"
+  else
+    mkdir -p "/var/www/certbot"
+  fi
 }
 
-gen_random_string() {
-    local length="$1"
-    openssl rand -base64 $((length * 2)) \
-        | tr -dc 'a-zA-Z0-9' \
-        | head -c "$length"
-}
+write_nginx_http_proxy_vhost() {
+  local target_path="$1"
+  local domain="$2"
+  local port="$3"
+  local write_tmp
+  write_tmp="$(mktemp)"
+  cat >"$write_tmp" <<NGINX_CONF
+server {
+    listen 80;
+    server_name ${domain};
 
-# prompt_or_default VARNAME "prompt text" "default" [ENV_NAME]
-# Interactive: read into VARNAME. Non-interactive: VARNAME = ${ENV_NAME:-default}.
-# ENV_NAME defaults to VARNAME when omitted. Keeps every interactive prompt
-# string byte-for-byte identical to the original `read -rp`.
-prompt_or_default() {
-    local __var="$1" __prompt="$2" __default="$3" __env="${4:-$1}"
-    if [[ "$NONINTERACTIVE" == "1" ]]; then
-        printf -v "$__var" '%s' "${!__env:-$__default}"
-    else
-        # shellcheck disable=SC2229
-        read -rp "$__prompt" "$__var"
-    fi
-}
+    client_max_body_size 25M;
 
-# write_install_result <user> <pass> <port> <webpath> <scheme> <host> <token> <dbtype>
-# Persists a parseable, root-only credentials file consumed by cloud-init/MOTD.
-# Values are written with printf '%q' so a pinned password/username containing
-# spaces, quotes, $(...) or backticks is shell-escaped and the file stays safely
-# source-able (consumers do '. install-result.env'). For the alphanumeric random
-# values gen_random_string emits, %q is a no-op. This is a DIFFERENT file from the
-# Postgres env file (/etc/default/x-ui).
-write_install_result() {
-    local u="$1" p="$2" port="$3" wbp="$4" scheme="$5" host="$6" token="$7" dbtype="$8"
-    local result_file="/etc/x-ui/install-result.env"
-    local url_host="${host:-SERVER_IP_UNKNOWN}"
-    install -d -m 755 /etc/x-ui 2> /dev/null
-    local prev_umask
-    prev_umask=$(umask)
-    umask 077
-    if ! {
-        printf 'XUI_USERNAME=%q\n' "$u"
-        printf 'XUI_PASSWORD=%q\n' "$p"
-        printf 'XUI_PANEL_PORT=%q\n' "$port"
-        printf 'XUI_WEB_BASE_PATH=%q\n' "$wbp"
-        printf 'XUI_ACCESS_URL=%q\n' "${scheme}://${url_host}:${port}/${wbp}"
-        printf 'XUI_API_TOKEN=%q\n' "$token"
-        printf 'XUI_DB_TYPE=%q\n' "$dbtype"
-    } > "$result_file"; then
-        umask "$prev_umask"
-        echo -e "${yellow}Warning: failed to write ${result_file}.${plain}" >&2
-        return 1
-    fi
-    umask "$prev_umask"
-    chmod 600 "$result_file" 2> /dev/null
-    chown root:root "$result_file" 2> /dev/null || true
-    echo -e "${green}Install result written to ${result_file} (mode 600).${plain}"
-}
-
-# RHEL-family initdb writes pg_hba.conf host rules with ident auth, which
-# compares the OS username against the Postgres role and always rejects the
-# randomly generated panel role over TCP (#5806). Prepend password-auth rules
-# scoped to the panel database; first match wins, and md5 also accepts
-# scram-sha-256-stored verifiers, so this works on every supported distro.
-pg_ensure_hba_password_auth() {
-    local pg_db="$1"
-    local hba_file
-    hba_file=$(sudo -u postgres psql -tAc 'SHOW hba_file' 2> /dev/null | tr -d '[:space:]')
-    [[ -n "${hba_file}" && -f "${hba_file}" ]] || return 0
-    grep -Eq "^host[[:space:]]+${pg_db}[[:space:]]" "${hba_file}" && return 0
-    local tmp
-    tmp=$(mktemp) || return 1
-    {
-        echo "# Added by 3x-ui: allow password logins for the panel database."
-        echo "host    ${pg_db}    all    127.0.0.1/32    md5"
-        echo "host    ${pg_db}    all    ::1/128         md5"
-        cat "${hba_file}"
-    } > "${tmp}" || {
-        rm -f "${tmp}"
-        return 1
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files \$uri =404;
     }
-    cat "${tmp}" > "${hba_file}" || {
-        rm -f "${tmp}"
-        return 1
+
+    location ^~ /socket.io/ {
+        proxy_pass http://127.0.0.1:${port}/socket.io/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+        proxy_buffering off;
     }
-    rm -f "${tmp}"
-    sudo -u postgres psql -tAc 'SELECT pg_reload_conf()' > /dev/null 2>&1 || true
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX_CONF
+  if ! write_file_with_optional_sudo "$write_tmp" "$target_path"; then
+    rm -f "$write_tmp"
+    return 1
+  fi
+  rm -f "$write_tmp"
+  return 0
 }
 
-install_postgres_local() {
-    local pg_user pg_pass
-    pg_pass=$(gen_random_string 24)
-    local pg_db="xui"
-    local pg_host="127.0.0.1"
-    local pg_port="5432"
+write_nginx_https_proxy_vhost() {
+  local target_path="$1"
+  local domain="$2"
+  local port="$3"
+  local write_tmp
+  write_tmp="$(mktemp)"
+  cat >"$write_tmp" <<NGINX_CONF
+server {
+    listen 80;
+    server_name ${domain};
 
-    case "${release}" in
-        ubuntu | debian | armbian)
-            apt-get update >&2 && apt-get install -y -q postgresql >&2 || return 1
-            ;;
-        fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
-            dnf install -y -q postgresql-server postgresql-contrib >&2 || return 1
-            [[ -d /var/lib/pgsql/data && -f /var/lib/pgsql/data/PG_VERSION ]] || postgresql-setup --initdb >&2 || return 1
-            ;;
-        centos)
-            if [[ "${VERSION_ID}" =~ ^7 ]]; then
-                yum install -y postgresql-server postgresql-contrib >&2 || return 1
-            else
-                dnf install -y -q postgresql-server postgresql-contrib >&2 || return 1
-            fi
-            [[ -d /var/lib/pgsql/data && -f /var/lib/pgsql/data/PG_VERSION ]] || postgresql-setup --initdb >&2 || return 1
-            ;;
-        arch | manjaro | parch)
-            pacman -Sy --noconfirm postgresql >&2 || return 1
-            if [[ ! -f /var/lib/postgres/data/PG_VERSION ]]; then
-                sudo -u postgres initdb -D /var/lib/postgres/data >&2 || return 1
-            fi
-            ;;
-        opensuse-tumbleweed | opensuse-leap)
-            zypper -q install -y postgresql-server postgresql-contrib >&2 || return 1
-            if [[ ! -f /var/lib/pgsql/data/PG_VERSION ]]; then
-                install -d -o postgres -g postgres -m 700 /var/lib/pgsql/data >&2 || return 1
-                su - postgres -c "initdb -D /var/lib/pgsql/data" >&2 || return 1
-            fi
-            ;;
-        alpine)
-            apk add --no-cache postgresql postgresql-contrib >&2 || return 1
-            if [[ ! -f /var/lib/postgresql/data/PG_VERSION ]]; then
-                /etc/init.d/postgresql setup >&2 || return 1
-            fi
-            rc-update add postgresql default >&2 2> /dev/null || true
-            rc-service postgresql start >&2 || return 1
-            ;;
-        *)
-            echo -e "${red}Unsupported distro for automatic PostgreSQL install: ${release}${plain}" >&2
-            return 1
-            ;;
-    esac
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files \$uri =404;
+    }
 
-    if [[ "${release}" != "alpine" ]]; then
-        systemctl enable --now postgresql >&2 || return 1
-    fi
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
 
-    # Wait briefly for the server to accept connections.
-    local i
-    for i in 1 2 3 4 5; do
-        sudo -u postgres psql -tAc 'SELECT 1' > /dev/null 2>&1 && break
-        sleep 1
-    done
+server {
+    listen 443 ssl;
+    server_name ${domain};
 
-    local existing_owner=""
-    existing_owner=$(sudo -u postgres psql -tAc \
-        "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname='${pg_db}'" 2> /dev/null \
-        | tr -d '[:space:]')
-    if [[ -n "${existing_owner}" && "${existing_owner}" != "postgres" ]]; then
-        pg_user="${existing_owner}"
+    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+
+    client_max_body_size 25M;
+
+    location ^~ /socket.io/ {
+        proxy_pass http://127.0.0.1:${port}/socket.io/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+        proxy_buffering off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX_CONF
+  if ! write_file_with_optional_sudo "$write_tmp" "$target_path"; then
+    rm -f "$write_tmp"
+    return 1
+  fi
+  rm -f "$write_tmp"
+  return 0
+}
+
+setup_nginx_vhost() {
+  local port domain_raw domain vhost_path sites_enabled default_conf current_origin current_domain
+  local server_ip use_sudo certbot_email
+  port="$(load_env_value PORT)"; [[ -n "$port" ]] || port="3000"
+  server_ip="$(curl -4 -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+  current_origin="$(load_env_value APP_ORIGIN)"
+  current_domain="$(extract_domain_from_origin "$current_origin")"
+
+  while true; do
+    if [[ "$INTERACTIVE" == "1" ]]; then
+      echo
+      printf "Domain or subdomain for FelFelChat (e.g. felfel.example.com)\n"
+      if [[ -n "$current_domain" ]]; then
+        read -r -p "Leave blank to use IP only (http://${server_ip}:${port}) [${current_domain}]: " domain_raw
+        domain_raw="${domain_raw:-$current_domain}"
+      else
+        read -r -p "Leave blank to use IP only (http://${server_ip}:${port}): " domain_raw
+      fi
     else
-        pg_user=$(gen_random_string 8)
+      domain_raw="${FELFEL_DOMAIN:-}"
+    fi
+    domain="$(normalize_domain_input "$domain_raw")"
+    if [[ -z "$domain" ]]; then
+      break
+    fi
+    if is_valid_domain "$domain"; then
+      break
+    fi
+    warn "Invalid domain format: '${domain_raw}'"
+    if [[ "$INTERACTIVE" != "1" ]]; then
+      domain=""
+      break
+    fi
+  done
+
+  if [[ -z "$domain" ]]; then
+    upsert_env "APP_ORIGIN" "http://${server_ip}:${port}"
+    ok "APP_ORIGIN set to http://${server_ip}:${port}"
+    return
+  fi
+
+  ensure_nginx
+
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
+    warn "Cannot write nginx config (no sudo). Configure nginx manually."
+    upsert_env "APP_ORIGIN" "http://${server_ip}:${port}"
+    return
+  fi
+
+  resolve_nginx_paths
+  vhost_path="$NGINX_VHOST_PATH"
+  sites_enabled="$NGINX_ENABLE_PATH"
+  default_conf="$NGINX_DEFAULT_PATH"
+  use_sudo="0"
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    use_sudo="1"
+  fi
+
+  if ! write_nginx_http_proxy_vhost "$vhost_path" "$domain" "$port"; then
+    warn "Failed to write nginx config at ${vhost_path}"
+    upsert_env "APP_ORIGIN" "http://${server_ip}:${port}"
+    return
+  fi
+
+  if ! link_file_with_optional_sudo "$vhost_path" "$sites_enabled"; then
+    warn "Failed to enable nginx config at ${sites_enabled}"
+    return
+  fi
+
+  if [[ -n "$default_conf" ]] && [[ -f "$default_conf" ]]; then
+    remove_file_with_optional_sudo "$default_conf" || warn "Could not remove default nginx config: ${default_conf}"
+  fi
+
+  if ! reload_nginx_service "$use_sudo"; then
+    warn "nginx test/reload failed. Fix config and retry."
+    return
+  fi
+
+  upsert_env "APP_ORIGIN" "http://${domain}"
+  upsert_env "NEXT_PUBLIC_WEBRTC_TURN_URLS" "$(build_turn_urls_for_domain "$domain")"
+  ok "nginx vhost configured for ${domain}"
+
+  local get_ssl="Y"
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    read -r -p "Enable HTTPS with Let's Encrypt (certbot)? [Y/n]: " get_ssl
+  fi
+
+  if [[ "${get_ssl:-Y}" =~ ^[Yy]$ ]]; then
+    local certbot_success
+    certbot_success="0"
+    ensure_certbot_webroot "$use_sudo"
+    if [[ "$INTERACTIVE" == "1" ]]; then
+      read -r -p "Email for Let's Encrypt notifications (leave blank to use --register-unsafely-no-email): " certbot_email
     fi
 
-    # Idempotent role/db creation. Identifiers are double-quoted because a
-    # random username may start with a digit, which Postgres rejects unquoted.
-    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${pg_user}'" 2> /dev/null \
-        | grep -q 1 \
-        || sudo -u postgres psql -c "CREATE USER \"${pg_user}\" WITH PASSWORD '${pg_pass}';" >&2 || return 1
+    if ! command -v certbot >/dev/null 2>&1; then
+      log "Installing certbot..."
+      local mgr
+      mgr="$(detect_pkg_manager)"
+      case "$mgr" in
+        apt)
+          pkg_install "$mgr" certbot python3-certbot-nginx
+          ;;
+        dnf|yum)
+          pkg_install "$mgr" certbot python3-certbot-nginx
+          ;;
+        apk)
+          pkg_install "$mgr" certbot certbot-nginx
+          ;;
+        pacman)
+          pkg_install "$mgr" certbot certbot-nginx
+          ;;
+        *)
+          warn "Cannot auto-install certbot. Install manually and run: certbot certonly --webroot -w /var/www/certbot -d ${domain}"
+          return
+          ;;
+      esac
+    fi
 
-    sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${pg_db}'" 2> /dev/null \
-        | grep -q 1 \
-        || sudo -u postgres psql -c "CREATE DATABASE \"${pg_db}\" OWNER \"${pg_user}\";" >&2 || return 1
+    local certbot_args
+    certbot_args=(certonly --webroot -w "/var/www/certbot" -d "$domain" --non-interactive --agree-tos --keep-until-expiring)
+    if [[ -n "${certbot_email:-}" ]]; then
+      certbot_args+=(--email "$certbot_email")
+    else
+      certbot_args+=(--register-unsafely-no-email)
+    fi
 
-    sudo -u postgres psql -c "ALTER USER \"${pg_user}\" WITH PASSWORD '${pg_pass}';" >&2 || return 1
+    if [[ "$use_sudo" == "1" ]]; then
+      if sudo certbot "${certbot_args[@]}"; then
+        certbot_success="1"
+      else
+        warn "certbot failed. Checking for existing certificate files..."
+      fi
+    else
+      if certbot "${certbot_args[@]}"; then
+        certbot_success="1"
+      else
+        warn "certbot failed. Checking for existing certificate files..."
+      fi
+    fi
 
-    pg_ensure_hba_password_auth "${pg_db}" \
-        || echo -e "${yellow}Warning: could not update pg_hba.conf; PostgreSQL may reject the panel's TCP login (ident auth).${plain}" >&2
+    if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]] && [[ -f "/etc/letsencrypt/live/${domain}/privkey.pem" ]]; then
+      certbot_success="1"
+    fi
 
-    local pg_pass_enc
-    pg_pass_enc=$(printf '%s' "${pg_pass}" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/@/%40/g' -e 's|/|%2F|g' -e 's/?/%3F/g' -e 's/#/%23/g')
+    if [[ "$certbot_success" == "1" ]]; then
+      if ! write_nginx_https_proxy_vhost "$vhost_path" "$domain" "$port"; then
+        warn "SSL certificate exists but failed to write HTTPS nginx config."
+        return
+      fi
+      if ! link_file_with_optional_sudo "$vhost_path" "$sites_enabled"; then
+        warn "Failed to enable HTTPS nginx config at ${sites_enabled}"
+        return
+      fi
+      if ! reload_nginx_service "$use_sudo"; then
+        warn "Failed to reload nginx after HTTPS config update."
+        return
+      fi
+      upsert_env "APP_ORIGIN" "https://${domain}"
+      upsert_env "NEXT_PUBLIC_WEBRTC_TURN_URLS" "$(build_turn_urls_for_domain "$domain")"
+      ok "SSL configured. APP_ORIGIN set to https://${domain}"
+    else
+      if [[ "$use_sudo" == "1" ]]; then
+        warn "SSL not configured. Retry manually: sudo certbot certonly --webroot -w /var/www/certbot -d ${domain}"
+      else
+        warn "SSL not configured. Retry manually: certbot certonly --webroot -w /var/www/certbot -d ${domain}"
+      fi
+    fi
+  fi
+}
 
-    if [[ -n "${PG_CRED_FILE:-}" ]]; then
-        local prev_umask
-        prev_umask=$(umask)
-        umask 077
-        if ! cat > "${PG_CRED_FILE}" << EOF; then
-PG_USER=${pg_user}
-PG_PASS=${pg_pass}
-PG_HOST=${pg_host}
-PG_PORT=${pg_port}
-PG_DB=${pg_db}
+setup_nginx_vhost_tui() {
+  header
+  setup_nginx_vhost
+  pause
+}
+
+bootstrap_interactive() {
+
+  header
+  need_cmd bash
+  detect_interactive
+  ensure_base_tools
+  ensure_node_toolchain
+
+  local install_dir repo ref use_systemd default_dir default_port default_origin
+  default_dir="$(default_install_dir)"
+  default_port="3000"
+  default_origin="http://felfel.example.com"
+
+  echo "Welcome to ${APP_NAME} one-shot installer"
+  echo
+  install_dir="$(prompt_with_default "Install directory" "$default_dir")"
+  APP_DIR="$install_dir"
+  set_paths
+
+  repo="$(prompt_with_default "Repository (owner/name or git URL)" "$DEFAULT_REPO")"
+  ref="$(prompt_with_default "Branch/Ref" "$DEFAULT_REF")"
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    read -r -p "Use systemd service if available? [Y/n]: " use_systemd
+    if [[ "${use_systemd:-Y}" =~ ^[Nn]$ ]]; then USE_SYSTEMD="0"; else USE_SYSTEMD="1"; fi
+  else
+    USE_SYSTEMD="1"
+    log "Use systemd service if available: yes (non-interactive mode)"
+  fi
+
+  clone_or_update_repo "$repo" "$ref"
+  set_paths
+  cleanup_legacy_sqlite_artifacts
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    local runtime_user
+    runtime_user="$(default_runtime_user)"
+    if [[ -n "$runtime_user" ]]; then
+      chown -R "${runtime_user}:${runtime_user}" "${APP_DIR}" 2>/dev/null || true
+    fi
+  fi
+  setup_env_interactive
+  ensure_nginx
+  setup_nginx_vhost
+  install_dependencies
+  run_migrations
+  build_app
+  install_systemd_service
+  start_server
+  install_launcher
+  printf "%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" >"$LAST_DEPLOY_FILE"
+  save_config
+
+  ok "Installation finished."
+  echo "Run: felfel"
+  if [[ "$INTERACTIVE" == "1" ]]; then
+    read -r -p "Open TUI manager now? [Y/n]: " open_now
+  else
+    open_now="n"
+    log "Open TUI manager now: no (non-interactive mode)"
+  fi
+  if [[ "${open_now:-Y}" =~ ^[Yy]$ ]]; then
+    /usr/bin/env bash "${APP_DIR}/install.sh" tui
+  fi
+}
+
+ensure_app_dir_for_tui() {
+  load_config
+  if [[ -z "${APP_DIR:-}" ]]; then
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -f "${script_dir}/package.json" && -f "${script_dir}/server.mjs" ]]; then
+      APP_DIR="$script_dir"
+      set_paths
+      return
+    fi
+    err "No installation config found. Run installer first."
+    exit 1
+  fi
+  set_paths
+}
+
+menu() {
+  while true; do
+    header
+    cat <<EOF
+$(printf "%b" "$COLOR_BOLD")Runtime$(printf "%b" "$COLOR_RESET")
+  1) Status dashboard
+  2) Start server
+  3) Stop server
+  4) Restart server
+  5) Live logs
+  6) Health/Readiness check
+
+$(printf "%b" "$COLOR_BOLD")Deploy$(printf "%b" "$COLOR_RESET")
+  7) Full deploy (pull + install + db-sync + build + restart)
+  8) Update source code only
+  9) Setup wizard (.env/secrets/port/origin)
+ 10) Change port/origin
+
+$(printf "%b" "$COLOR_BOLD")Backup$(printf "%b" "$COLOR_RESET")
+ 11) Create manual DB backup
+ 12) Restore manual DB backup
+
+$(printf "%b" "$COLOR_BOLD")Tools$(printf "%b" "$COLOR_RESET")
+ 13) Install/repair 'felfel' launcher
+ 14) Setup/update nginx vhost + APP_ORIGIN
+ 15) Uninstall FelFel
+ 16) Change superadmin password/username
+  0) Exit
 EOF
-            umask "${prev_umask}"
-            echo -e "${red}Failed to write PostgreSQL credentials to ${PG_CRED_FILE}${plain}" >&2
-            return 1
-        fi
-        umask "${prev_umask}"
-    fi
-
-    echo "postgres://${pg_user}:${pg_pass_enc}@${pg_host}:${pg_port}/${pg_db}?sslmode=disable"
-    return 0
-}
-
-ensure_pg_client() {
-    if command -v pg_dump > /dev/null 2>&1 && command -v pg_restore > /dev/null 2>&1; then
-        return 0
-    fi
-    echo -e "${yellow}Installing PostgreSQL client tools (pg_dump/pg_restore) for in-panel backup...${plain}" >&2
-    case "${release}" in
-        ubuntu | debian | armbian)
-            apt-get update >&2 && apt-get install -y -q postgresql-client >&2 || return 1
-            ;;
-        fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
-            dnf install -y -q postgresql >&2 || return 1
-            ;;
-        centos)
-            if [[ "${VERSION_ID}" =~ ^7 ]]; then
-                yum install -y postgresql >&2 || return 1
-            else
-                dnf install -y -q postgresql >&2 || return 1
-            fi
-            ;;
-        arch | manjaro | parch)
-            pacman -Sy --noconfirm postgresql >&2 || return 1
-            ;;
-        opensuse-tumbleweed | opensuse-leap)
-            zypper -q install -y postgresql >&2 || return 1
-            ;;
-        alpine)
-            apk add --no-cache postgresql-client >&2 || return 1
-            ;;
-        *)
-            return 1
-            ;;
+    echo
+    read -r -p "Select an action: " choice
+    case "$choice" in
+      1) show_status ;;
+      2) header; start_server; pause ;;
+      3) header; stop_server; pause ;;
+      4) header; restart_server; pause ;;
+      5) tail_logs ;;
+      6) health_check ;;
+      7) full_deploy ;;
+      8) header; update_repo; pause ;;
+      9) run_setup_wizard ;;
+      10) change_port_origin ;;
+      11) create_backup_manual ;;
+      12) restore_backup_manual ;;
+      13) header; install_launcher; pause ;;
+      14) setup_nginx_vhost_tui ;;
+      15) uninstall_app ;;
+      16) superadmin_change_credentials ;;
+      0) exit 0 ;;
+      *) warn "Invalid option"; pause ;;
     esac
-    command -v pg_dump > /dev/null 2>&1 && command -v pg_restore > /dev/null 2>&1
+  done
 }
 
-install_acme() {
-    echo -e "${green}Installing acme.sh for SSL certificate management...${plain}"
-    cd ~ || return 1
-    curl -s https://get.acme.sh | sh > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo -e "${red}Failed to install acme.sh${plain}"
-        return 1
-    else
-        echo -e "${green}acme.sh installed successfully${plain}"
-    fi
-    return 0
+main() {
+  detect_interactive
+  local mode="${1:-install}"
+  case "$mode" in
+    install) bootstrap_interactive ;;
+    tui) ensure_app_dir_for_tui; menu ;;
+    uninstall) ensure_app_dir_for_tui; uninstall_app ;;
+    superadmin) ensure_app_dir_for_tui; superadmin_change_credentials ;;
+    *)
+      err "Unknown mode: $mode"
+      err "Usage: install.sh [install|tui|uninstall|superadmin]"
+      exit 1
+      ;;
+  esac
 }
 
-setup_ssl_certificate() {
-    local domain="$1"
-    local server_ip="$2"
-    local existing_port="$3"
-    local existing_webBasePath="$4"
-
-    echo -e "${green}Setting up SSL certificate...${plain}"
-
-    # Check if acme.sh is installed
-    if ! command -v ~/.acme.sh/acme.sh &> /dev/null; then
-        install_acme
-        if [ $? -ne 0 ]; then
-            echo -e "${yellow}Failed to install acme.sh, skipping SSL setup${plain}"
-            return 1
-        fi
-    fi
-
-    # Create certificate directory
-    local certPath="/root/cert/${domain}"
-    mkdir -p "$certPath"
-
-    # Issue certificate
-    echo -e "${green}Issuing SSL certificate for ${domain}...${plain}"
-    echo -e "${yellow}Note: Port 80 must be open and accessible from the internet${plain}"
-
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt --force > /dev/null 2>&1
-    ~/.acme.sh/acme.sh --issue -d ${domain} $(acme_listen_flag) --standalone --httpport 80 --force
-
-    if [ $? -ne 0 ]; then
-        echo -e "${yellow}Failed to issue certificate for ${domain}${plain}"
-        echo -e "${yellow}Please ensure port 80 is open and try again later with: x-ui${plain}"
-        rm -rf ~/.acme.sh/${domain} ~/.acme.sh/${domain}_ecc 2> /dev/null
-        rm -rf "$certPath" 2> /dev/null
-        return 1
-    fi
-
-    # Install certificate
-    ~/.acme.sh/acme.sh --installcert --force -d ${domain} \
-        --key-file /root/cert/${domain}/privkey.pem \
-        --fullchain-file /root/cert/${domain}/fullchain.pem \
-        --reloadcmd "systemctl restart x-ui" > /dev/null 2>&1
-
-    if [ $? -ne 0 ]; then
-        echo -e "${yellow}Failed to install certificate${plain}"
-        return 1
-    fi
-
-    # Enable auto-renew
-    ~/.acme.sh/acme.sh --upgrade --auto-upgrade > /dev/null 2>&1
-    # Secure permissions: private key readable only by owner
-    chmod 600 $certPath/privkey.pem 2> /dev/null
-    chmod 644 $certPath/fullchain.pem 2> /dev/null
-
-    # Set certificate for panel
-    local webCertFile="/root/cert/${domain}/fullchain.pem"
-    local webKeyFile="/root/cert/${domain}/privkey.pem"
-
-    if [[ -f "$webCertFile" && -f "$webKeyFile" ]]; then
-        ${xui_folder}/x-ui cert -webCert "$webCertFile" -webCertKey "$webKeyFile" > /dev/null 2>&1
-        echo -e "${green}SSL certificate installed and configured successfully!${plain}"
-        return 0
-    else
-        echo -e "${yellow}Certificate files not found${plain}"
-        return 1
-    fi
-}
-
-# Issue Let's Encrypt IP certificate with shortlived profile (~6 days validity)
-# Requires acme.sh and port 80 open for HTTP-01 challenge
-setup_ip_certificate() {
-    local ipv4="$1"
-    local ipv6="$2" # optional
-
-    echo -e "${green}Setting up Let's Encrypt IP certificate (shortlived profile)...${plain}"
-    echo -e "${yellow}Note: IP certificates are valid for ~6 days and will auto-renew.${plain}"
-    echo -e "${yellow}Default listener is port 80. If you choose another port, ensure external port 80 forwards to it.${plain}"
-
-    # Check for acme.sh
-    if ! command -v ~/.acme.sh/acme.sh &> /dev/null; then
-        install_acme
-        if [ $? -ne 0 ]; then
-            echo -e "${red}Failed to install acme.sh${plain}"
-            return 1
-        fi
-    fi
-
-    # Validate IP address
-    if [[ -z "$ipv4" ]]; then
-        echo -e "${red}IPv4 address is required${plain}"
-        return 1
-    fi
-
-    if ! is_ipv4 "$ipv4"; then
-        echo -e "${red}Invalid IPv4 address: $ipv4${plain}"
-        return 1
-    fi
-
-    # Create certificate directory
-    local certDir="/root/cert/ip"
-    mkdir -p "$certDir"
-
-    # Build domain arguments
-    local domain_args="-d ${ipv4}"
-    if [[ -n "$ipv6" ]] && is_ipv6 "$ipv6"; then
-        domain_args="${domain_args} -d ${ipv6}"
-        echo -e "${green}Including IPv6 address: ${ipv6}${plain}"
-    fi
-
-    # Set reload command for auto-renewal (add || true so it doesn't fail during first install)
-    local reloadCmd="systemctl restart x-ui 2>/dev/null || rc-service x-ui restart 2>/dev/null || true"
-
-    # Choose port for HTTP-01 listener (default 80, prompt override)
-    local WebPort=""
-    prompt_or_default WebPort "Port to use for ACME HTTP-01 listener (default 80): " "80" XUI_ACME_HTTP_PORT
-    WebPort="${WebPort:-80}"
-    if ! [[ "${WebPort}" =~ ^[0-9]+$ ]] || ((WebPort < 1 || WebPort > 65535)); then
-        echo -e "${red}Invalid port provided. Falling back to 80.${plain}"
-        WebPort=80
-    fi
-    echo -e "${green}Using port ${WebPort} for standalone validation.${plain}"
-    if [[ "${WebPort}" -ne 80 ]]; then
-        echo -e "${yellow}Reminder: Let's Encrypt still connects on port 80; forward external port 80 to ${WebPort}.${plain}"
-    fi
-
-    # Ensure chosen port is available
-    while true; do
-        if is_port_in_use "${WebPort}"; then
-            echo -e "${yellow}Port ${WebPort} is in use.${plain}"
-
-            local alt_port=""
-            if [[ "$NONINTERACTIVE" == "1" ]]; then
-                echo -e "${red}Port ${WebPort} is busy; cannot proceed in non-interactive mode.${plain}"
-                return 1
-            fi
-            read -rp "Enter another port for acme.sh standalone listener (leave empty to abort): " alt_port
-            alt_port="${alt_port// /}"
-            if [[ -z "${alt_port}" ]]; then
-                echo -e "${red}Port ${WebPort} is busy; cannot proceed.${plain}"
-                return 1
-            fi
-            if ! [[ "${alt_port}" =~ ^[0-9]+$ ]] || ((alt_port < 1 || alt_port > 65535)); then
-                echo -e "${red}Invalid port provided.${plain}"
-                return 1
-            fi
-            WebPort="${alt_port}"
-            continue
-        else
-            echo -e "${green}Port ${WebPort} is free and ready for standalone validation.${plain}"
-            break
-        fi
-    done
-
-    # Issue certificate with shortlived profile
-    echo -e "${green}Issuing IP certificate for ${ipv4}...${plain}"
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt --force > /dev/null 2>&1
-    [[ -n "${XUI_ACME_EMAIL:-}" ]] && ~/.acme.sh/acme.sh --register-account -m "${XUI_ACME_EMAIL}" > /dev/null 2>&1
-
-    ~/.acme.sh/acme.sh --issue \
-        ${domain_args} \
-        --standalone \
-        --server letsencrypt \
-        --certificate-profile shortlived \
-        --days 6 \
-        --httpport ${WebPort} \
-        --force
-
-    if [ $? -ne 0 ]; then
-        echo -e "${red}Failed to issue IP certificate${plain}"
-        echo -e "${yellow}Please ensure port ${WebPort} is reachable (or forwarded from external port 80)${plain}"
-        # Cleanup acme.sh data for both IPv4 and IPv6 if specified
-        rm -rf ~/.acme.sh/${ipv4} ~/.acme.sh/${ipv4}_ecc 2> /dev/null
-        [[ -n "$ipv6" ]] && rm -rf ~/.acme.sh/${ipv6} ~/.acme.sh/${ipv6}_ecc 2> /dev/null
-        rm -rf ${certDir} 2> /dev/null
-        return 1
-    fi
-
-    echo -e "${green}Certificate issued successfully, installing...${plain}"
-
-    # Install certificate
-    # Note: acme.sh may report "Reload error" and exit non-zero if reloadcmd fails,
-    # but the cert files are still installed. We check for files instead of exit code.
-    ~/.acme.sh/acme.sh --installcert --force -d ${ipv4} \
-        --key-file "${certDir}/privkey.pem" \
-        --fullchain-file "${certDir}/fullchain.pem" \
-        --reloadcmd "${reloadCmd}" 2>&1 || true
-
-    # Verify certificate files exist (don't rely on exit code - reloadcmd failure causes non-zero)
-    if [[ ! -f "${certDir}/fullchain.pem" || ! -f "${certDir}/privkey.pem" ]]; then
-        echo -e "${red}Certificate files not found after installation${plain}"
-        # Cleanup acme.sh data for both IPv4 and IPv6 if specified
-        rm -rf ~/.acme.sh/${ipv4} ~/.acme.sh/${ipv4}_ecc 2> /dev/null
-        [[ -n "$ipv6" ]] && rm -rf ~/.acme.sh/${ipv6} ~/.acme.sh/${ipv6}_ecc 2> /dev/null
-        rm -rf ${certDir} 2> /dev/null
-        return 1
-    fi
-
-    echo -e "${green}Certificate files installed successfully${plain}"
-
-    # Enable auto-upgrade for acme.sh (ensures cron job runs)
-    ~/.acme.sh/acme.sh --upgrade --auto-upgrade > /dev/null 2>&1
-
-    # Secure permissions: private key readable only by owner
-    chmod 600 ${certDir}/privkey.pem 2> /dev/null
-    chmod 644 ${certDir}/fullchain.pem 2> /dev/null
-
-    # Configure panel to use the certificate
-    echo -e "${green}Setting certificate paths for the panel...${plain}"
-    ${xui_folder}/x-ui cert -webCert "${certDir}/fullchain.pem" -webCertKey "${certDir}/privkey.pem"
-
-    if [ $? -ne 0 ]; then
-        echo -e "${yellow}Warning: Could not set certificate paths automatically${plain}"
-        echo -e "${yellow}Certificate files are at:${plain}"
-        echo -e "  Cert: ${certDir}/fullchain.pem"
-        echo -e "  Key:  ${certDir}/privkey.pem"
-    else
-        echo -e "${green}Certificate paths configured successfully${plain}"
-    fi
-
-    echo -e "${green}IP certificate installed and configured successfully!${plain}"
-    echo -e "${green}Certificate valid for ~6 days, auto-renews via acme.sh cron job.${plain}"
-    echo -e "${yellow}acme.sh will automatically renew and reload x-ui before expiry.${plain}"
-    return 0
-}
-
-# Comprehensive manual SSL certificate issuance via acme.sh
-ssl_cert_issue() {
-    local existing_webBasePath=$(${xui_folder}/x-ui setting -show true | grep 'webBasePath:' | awk -F': ' '{print $2}' | tr -d '[:space:]' | sed 's#^/##')
-    local existing_port=$(${xui_folder}/x-ui setting -show true | grep 'port:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
-
-    # check for acme.sh first
-    if ! command -v ~/.acme.sh/acme.sh &> /dev/null; then
-        echo "acme.sh could not be found. Installing now..."
-        cd ~ || return 1
-        curl -s https://get.acme.sh | sh
-        if [ $? -ne 0 ]; then
-            echo -e "${red}Failed to install acme.sh${plain}"
-            return 1
-        else
-            echo -e "${green}acme.sh installed successfully${plain}"
-        fi
-    fi
-
-    # get the domain here, and we need to verify it
-    local domain=""
-    if [[ "$NONINTERACTIVE" == "1" ]]; then
-        domain="${XUI_DOMAIN// /}"
-        if [[ -z "$domain" ]] || ! is_domain "$domain"; then
-            echo -e "${red}XUI_SSL_MODE=domain requires a valid XUI_DOMAIN (got: '${XUI_DOMAIN:-}').${plain}"
-            return 1
-        fi
-    else
-        while true; do
-            read -rp "Please enter your domain name: " domain
-            domain="${domain// /}" # Trim whitespace
-
-            if [[ -z "$domain" ]]; then
-                echo -e "${red}Domain name cannot be empty. Please try again.${plain}"
-                continue
-            fi
-
-            if ! is_domain "$domain"; then
-                echo -e "${red}Invalid domain format: ${domain}. Please enter a valid domain name.${plain}"
-                continue
-            fi
-
-            break
-        done
-    fi
-    echo -e "${green}Your domain is: ${domain}, checking it...${plain}"
-    SSL_ISSUED_DOMAIN="${domain}"
-
-    # detect existing certificate and reuse it only if its files are actually
-    # present and non-empty. acme.sh stores ECC certs under ${domain}_ecc and RSA
-    # certs under ${domain}; a failed issuance can leave a domain entry in --list
-    # with no usable cert files, which must not be reused (it produces a 0-byte
-    # fullchain.pem). Broken partial state is cleaned up so issuance can proceed.
-    local cert_exists=0
-    if ~/.acme.sh/acme.sh --list 2> /dev/null | awk '{print $1}' | grep -Fxq "${domain}"; then
-        local acmeCertDir=""
-        if [[ -s ~/.acme.sh/${domain}_ecc/fullchain.cer && -s ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
-            acmeCertDir=~/.acme.sh/${domain}_ecc
-        elif [[ -s ~/.acme.sh/${domain}/fullchain.cer && -s ~/.acme.sh/${domain}/${domain}.key ]]; then
-            acmeCertDir=~/.acme.sh/${domain}
-        fi
-        if [[ -n "${acmeCertDir}" ]]; then
-            cert_exists=1
-            local certInfo=$(~/.acme.sh/acme.sh --list 2> /dev/null | grep -F "${domain}")
-            echo -e "${yellow}Existing certificate found for ${domain}, will reuse it.${plain}"
-            [[ -n "${certInfo}" ]] && echo "$certInfo"
-        else
-            echo -e "${yellow}Found incomplete acme.sh state for ${domain} (no valid certificate files); cleaning it up and re-issuing.${plain}"
-            rm -rf ~/.acme.sh/${domain} ~/.acme.sh/${domain}_ecc
-        fi
-    fi
-    if [[ ${cert_exists} -eq 0 ]]; then
-        echo -e "${green}Your domain is ready for issuing certificates now...${plain}"
-    fi
-
-    # create a directory for the certificate
-    certPath="/root/cert/${domain}"
-    if [ ! -d "$certPath" ]; then
-        mkdir -p "$certPath"
-    else
-        rm -rf "$certPath"
-        mkdir -p "$certPath"
-    fi
-
-    # get the port number for the standalone server
-    local WebPort=80
-    prompt_or_default WebPort "Please choose which port to use (default is 80): " "80" XUI_ACME_HTTP_PORT
-    if [[ -z ${WebPort} ]]; then
-        WebPort=80
-    elif [[ ! ${WebPort} =~ ^[1-9][0-9]*$ || ${WebPort} -gt 65535 ]]; then
-        echo -e "${yellow}Your input ${WebPort} is invalid, will use default port 80.${plain}"
-        WebPort=80
-    fi
-    echo -e "${green}Will use port: ${WebPort} to issue certificates. Please make sure this port is open.${plain}"
-
-    # Stop panel temporarily
-    echo -e "${yellow}Stopping panel temporarily...${plain}"
-    systemctl stop x-ui 2> /dev/null || rc-service x-ui stop 2> /dev/null
-
-    if [[ ${cert_exists} -eq 0 ]]; then
-        # issue the certificate
-        ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt --force
-        [[ -n "${XUI_ACME_EMAIL:-}" ]] && ~/.acme.sh/acme.sh --register-account -m "${XUI_ACME_EMAIL}" > /dev/null 2>&1
-        ~/.acme.sh/acme.sh --issue -d ${domain} $(acme_listen_flag) --standalone --httpport ${WebPort} --force
-        if [ $? -ne 0 ]; then
-            echo -e "${red}Issuing certificate failed, please check logs.${plain}"
-            rm -rf ~/.acme.sh/${domain} ~/.acme.sh/${domain}_ecc
-            systemctl start x-ui 2> /dev/null || rc-service x-ui start 2> /dev/null
-            return 1
-        else
-            echo -e "${green}Issuing certificate succeeded, installing certificates...${plain}"
-        fi
-    else
-        echo -e "${green}Using existing certificate, installing certificates...${plain}"
-    fi
-
-    # Setup reload command
-    reloadCmd="systemctl restart x-ui || rc-service x-ui restart"
-    echo -e "${green}Default --reloadcmd for ACME is: ${yellow}systemctl restart x-ui || rc-service x-ui restart${plain}"
-    echo -e "${green}This command will run on every certificate issue and renew.${plain}"
-    if [[ "$NONINTERACTIVE" == "1" ]]; then
-        setReloadcmd="n"
-    else
-        read -rp "Would you like to modify --reloadcmd for ACME? (y/n): " setReloadcmd
-    fi
-    if [[ "$setReloadcmd" == "y" || "$setReloadcmd" == "Y" ]]; then
-        echo -e "\n${green}\t1.${plain} Preset: systemctl reload nginx ; systemctl restart x-ui"
-        echo -e "${green}\t2.${plain} Input your own command"
-        echo -e "${green}\t0.${plain} Keep default reloadcmd"
-        read -rp "Choose an option: " choice
-        case "$choice" in
-            1)
-                echo -e "${green}Reloadcmd is: systemctl reload nginx ; systemctl restart x-ui${plain}"
-                reloadCmd="systemctl reload nginx ; systemctl restart x-ui"
-                ;;
-            2)
-                echo -e "${yellow}It's recommended to put x-ui restart at the end${plain}"
-                read -rp "Please enter your custom reloadcmd: " reloadCmd
-                echo -e "${green}Reloadcmd is: ${reloadCmd}${plain}"
-                ;;
-            *)
-                echo -e "${green}Keeping default reloadcmd${plain}"
-                ;;
-        esac
-    fi
-
-    # install the certificate
-    local installOutput=""
-    installOutput=$(~/.acme.sh/acme.sh --installcert --force -d ${domain} \
-        --key-file /root/cert/${domain}/privkey.pem \
-        --fullchain-file /root/cert/${domain}/fullchain.pem --reloadcmd "${reloadCmd}" 2>&1)
-    local installRc=$?
-    echo "${installOutput}"
-
-    local installWroteFiles=0
-    if echo "${installOutput}" | grep -q "Installing key to:" && echo "${installOutput}" | grep -q "Installing full chain to:"; then
-        installWroteFiles=1
-    fi
-
-    if [[ -f "/root/cert/${domain}/privkey.pem" && -f "/root/cert/${domain}/fullchain.pem" && (${installRc} -eq 0 || ${installWroteFiles} -eq 1) ]]; then
-        echo -e "${green}Installing certificate succeeded, enabling auto renew...${plain}"
-    else
-        echo -e "${red}Installing certificate failed, exiting.${plain}"
-        if [[ ${cert_exists} -eq 0 ]]; then
-            rm -rf ~/.acme.sh/${domain} ~/.acme.sh/${domain}_ecc
-        fi
-        systemctl start x-ui 2> /dev/null || rc-service x-ui start 2> /dev/null
-        return 1
-    fi
-
-    # enable auto-renew
-    ~/.acme.sh/acme.sh --upgrade --auto-upgrade
-    if [ $? -ne 0 ]; then
-        echo -e "${yellow}Auto renew setup had issues, certificate details:${plain}"
-        ls -lah /root/cert/${domain}/
-        # Secure permissions: private key readable only by owner
-        chmod 600 $certPath/privkey.pem 2> /dev/null
-        chmod 644 $certPath/fullchain.pem 2> /dev/null
-    else
-        echo -e "${green}Auto renew succeeded, certificate details:${plain}"
-        ls -lah /root/cert/${domain}/
-        # Secure permissions: private key readable only by owner
-        chmod 600 $certPath/privkey.pem 2> /dev/null
-        chmod 644 $certPath/fullchain.pem 2> /dev/null
-    fi
-
-    # start panel
-    systemctl start x-ui 2> /dev/null || rc-service x-ui start 2> /dev/null
-
-    # Prompt user to set panel paths after successful certificate installation
-    if [[ "$NONINTERACTIVE" == "1" ]]; then
-        setPanel="y"
-    else
-        read -rp "Would you like to set this certificate for the panel? (y/n): " setPanel
-    fi
-    if [[ "$setPanel" == "y" || "$setPanel" == "Y" ]]; then
-        local webCertFile="/root/cert/${domain}/fullchain.pem"
-        local webKeyFile="/root/cert/${domain}/privkey.pem"
-
-        if [[ -f "$webCertFile" && -f "$webKeyFile" ]]; then
-            ${xui_folder}/x-ui cert -webCert "$webCertFile" -webCertKey "$webKeyFile"
-            echo -e "${green}Certificate paths set for the panel${plain}"
-            echo -e "${green}Certificate File: $webCertFile${plain}"
-            echo -e "${green}Private Key File: $webKeyFile${plain}"
-            echo ""
-            echo -e "${green}Access URL: https://${domain}:${existing_port}/${existing_webBasePath}${plain}"
-            echo -e "${yellow}Panel will restart to apply SSL certificate...${plain}"
-            systemctl restart x-ui 2> /dev/null || rc-service x-ui restart 2> /dev/null
-        else
-            echo -e "${red}Error: Certificate or private key file not found for domain: $domain.${plain}"
-        fi
-    else
-        echo -e "${yellow}Skipping panel path setting.${plain}"
-    fi
-
-    return 0
-}
-
-# Reusable interactive SSL setup (domain or IP)
-# Sets global `SSL_HOST` to the chosen domain/IP for Access URL usage
-prompt_and_setup_ssl() {
-    local panel_port="$1"
-    local web_base_path="$2"
-    local server_ip="$3"
-
-    local ssl_choice=""
-    SSL_SCHEME="https"
-
-    echo -e "${yellow}Choose SSL certificate setup method:${plain}"
-    echo -e "${green}1.${plain} Let's Encrypt for Domain (90-day validity, auto-renews)"
-    echo -e "${green}2.${plain} Let's Encrypt for IP Address (6-day validity, auto-renews)"
-    echo -e "${green}3.${plain} Custom SSL Certificate (Path to existing files)"
-    echo -e "${green}4.${plain} Skip SSL (advanced — behind reverse proxy / SSH tunnel only)"
-    echo -e "${blue}Note:${plain} Options 1 & 2 require port 80 open. Option 3 requires manual paths."
-    echo -e "${blue}Note:${plain} Option 4 serves the panel over plain HTTP — only safe behind nginx/Caddy or an SSH tunnel."
-    if [[ "$NONINTERACTIVE" == "1" ]]; then
-        case "${XUI_SSL_MODE:-none}" in
-            domain) ssl_choice="1" ;;
-            ip) ssl_choice="2" ;;
-            none | "") ssl_choice="4" ;;
-            *)
-                echo -e "${yellow}Unknown XUI_SSL_MODE='${XUI_SSL_MODE}', defaulting to none (HTTP).${plain}"
-                ssl_choice="4"
-                ;;
-        esac
-    else
-        read -rp "Choose an option (default 2 for IP): " ssl_choice
-        ssl_choice="${ssl_choice// /}" # Trim whitespace
-
-        # Default to 2 (IP cert) if input is empty or invalid (not 1, 3 or 4)
-        if [[ "$ssl_choice" != "1" && "$ssl_choice" != "3" && "$ssl_choice" != "4" ]]; then
-            ssl_choice="2"
-        fi
-    fi
-
-    case "$ssl_choice" in
-        1)
-            # User chose Let's Encrypt domain option
-            echo -e "${green}Using Let's Encrypt for domain certificate...${plain}"
-            if ssl_cert_issue; then
-                local cert_domain="${SSL_ISSUED_DOMAIN}"
-                if [[ -z "${cert_domain}" ]]; then
-                    cert_domain=$(~/.acme.sh/acme.sh --list 2> /dev/null | tail -1 | awk '{print $1}')
-                fi
-
-                if [[ -n "${cert_domain}" ]]; then
-                    SSL_HOST="${cert_domain}"
-                    echo -e "${green}✓ SSL certificate configured successfully with domain: ${cert_domain}${plain}"
-                else
-                    echo -e "${yellow}SSL setup may have completed, but domain extraction failed${plain}"
-                    SSL_HOST="${server_ip}"
-                fi
-            else
-                echo -e "${red}SSL certificate setup failed for domain mode.${plain}"
-                SSL_HOST="${server_ip}"
-            fi
-            ;;
-        2)
-            # User chose Let's Encrypt IP certificate option
-            echo -e "${green}Using Let's Encrypt for IP certificate (shortlived profile)...${plain}"
-
-            # Confirm the auto-detected IP before issuing for it: with asymmetric
-            # routing / multi-WAN the echo services can return a transit address.
-            if [[ "$NONINTERACTIVE" != "1" ]]; then
-                local ip_confirm=""
-                read -rp "Is ${server_ip} the correct incoming public IPv4 address for this server? [Default y]: " ip_confirm
-                if [[ -n "$ip_confirm" && "$ip_confirm" != "y" && "$ip_confirm" != "Y" ]]; then
-                    server_ip=""
-                    while [[ -z "$server_ip" ]]; do
-                        read -rp "Please enter your server's public IPv4 address: " server_ip
-                        server_ip="${server_ip// /}"
-                        if [[ ! "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                            echo -e "${red}Invalid IPv4 address. Please try again.${plain}"
-                            server_ip=""
-                        fi
-                    done
-                fi
-            fi
-
-            # Ask for optional IPv6
-            local ipv6_addr=""
-            prompt_or_default ipv6_addr "Do you have an IPv6 address to include? (leave empty to skip): " "" XUI_SSL_IPV6
-            ipv6_addr="${ipv6_addr// /}" # Trim whitespace
-
-            # Stop panel if running (port 80 needed)
-            if [[ $release == "alpine" ]]; then
-                rc-service x-ui stop > /dev/null 2>&1
-            else
-                systemctl stop x-ui > /dev/null 2>&1
-            fi
-
-            setup_ip_certificate "${server_ip}" "${ipv6_addr}"
-            if [ $? -eq 0 ]; then
-                SSL_HOST="${server_ip}"
-                echo -e "${green}✓ Let's Encrypt IP certificate configured successfully${plain}"
-            else
-                echo -e "${red}✗ IP certificate setup failed. Please check port 80 is open.${plain}"
-                SSL_HOST="${server_ip}"
-            fi
-            ;;
-        3)
-            # User chose Custom Paths (User Provided) option
-            echo -e "${green}Using custom existing certificate...${plain}"
-            local custom_cert=""
-            local custom_key=""
-            local custom_domain=""
-
-            # 3.1 Request Domain to compose Panel URL later
-            read -rp "Please enter domain name certificate issued for: " custom_domain
-            custom_domain="${custom_domain// /}" # Remove spaces
-
-            # 3.2 Loop for Certificate Path
-            while true; do
-                read -rp "Input certificate path (keywords: .crt / fullchain): " custom_cert
-                # Strip quotes if present
-                custom_cert=$(echo "$custom_cert" | tr -d '"' | tr -d "'")
-
-                if [[ -f "$custom_cert" && -r "$custom_cert" && -s "$custom_cert" ]]; then
-                    break
-                elif [[ ! -f "$custom_cert" ]]; then
-                    echo -e "${red}Error: File does not exist! Try again.${plain}"
-                elif [[ ! -r "$custom_cert" ]]; then
-                    echo -e "${red}Error: File exists but is not readable (check permissions)!${plain}"
-                else
-                    echo -e "${red}Error: File is empty!${plain}"
-                fi
-            done
-
-            # 3.3 Loop for Private Key Path
-            while true; do
-                read -rp "Input private key path (keywords: .key / privatekey): " custom_key
-                # Strip quotes if present
-                custom_key=$(echo "$custom_key" | tr -d '"' | tr -d "'")
-
-                if [[ -f "$custom_key" && -r "$custom_key" && -s "$custom_key" ]]; then
-                    break
-                elif [[ ! -f "$custom_key" ]]; then
-                    echo -e "${red}Error: File does not exist! Try again.${plain}"
-                elif [[ ! -r "$custom_key" ]]; then
-                    echo -e "${red}Error: File exists but is not readable (check permissions)!${plain}"
-                else
-                    echo -e "${red}Error: File is empty!${plain}"
-                fi
-            done
-
-            # 3.4 Apply Settings via x-ui binary
-            ${xui_folder}/x-ui cert -webCert "$custom_cert" -webCertKey "$custom_key" > /dev/null 2>&1
-
-            # Set SSL_HOST for composing Panel URL
-            if [[ -n "$custom_domain" ]]; then
-                SSL_HOST="$custom_domain"
-            else
-                SSL_HOST="${server_ip}"
-            fi
-
-            echo -e "${green}✓ Custom certificate paths applied.${plain}"
-            echo -e "${yellow}Note: You are responsible for renewing these files externally.${plain}"
-
-            systemctl restart x-ui > /dev/null 2>&1 || rc-service x-ui restart > /dev/null 2>&1
-            ;;
-        4)
-            echo ""
-            echo -e "${red}⚠ Panel will be installed WITHOUT SSL/TLS.${plain}"
-            echo -e "${yellow}Login credentials and cookies will travel as plain HTTP.${plain}"
-            echo -e "${yellow}Only safe when:${plain}"
-            echo -e "${yellow}  • A reverse proxy (nginx, Caddy, Traefik) terminates TLS for you, or${plain}"
-            echo -e "${yellow}  • You access the panel exclusively via SSH tunnel${plain}"
-            echo ""
-
-            SSL_SCHEME="http"
-            SSL_HOST="${server_ip}"
-
-            local bind_local=""
-            if [[ "$NONINTERACTIVE" == "1" ]]; then
-                # Cloud images must stay reachable on their public interface.
-                bind_local="n"
-            else
-                read -rp "Bind the panel to 127.0.0.1 only? (recommended — forces SSH tunnel / reverse-proxy access) [y/N]: " bind_local
-            fi
-            if [[ "$bind_local" == "y" || "$bind_local" == "Y" ]]; then
-                ${xui_folder}/x-ui setting -listenIP "127.0.0.1" > /dev/null 2>&1
-                SSL_HOST="127.0.0.1"
-                echo -e "${green}✓ Panel bound to 127.0.0.1 only. It is now unreachable from the public internet.${plain}"
-                echo ""
-                echo -e "${green}SSH Port Forwarding — open the panel from your local machine via:${plain}"
-                echo -e "  Standard SSH command:"
-                echo -e "  ${yellow}ssh -L 2222:127.0.0.1:${panel_port} root@${server_ip}${plain}"
-                echo -e "  If using an SSH key:"
-                echo -e "  ${yellow}ssh -i <sshkeypath> -L 2222:127.0.0.1:${panel_port} root@${server_ip}${plain}"
-                echo -e "  Then open in your browser:"
-                echo -e "  ${yellow}http://localhost:2222/${web_base_path}${plain}"
-                echo ""
-                echo -e "${yellow}Alternative: point a reverse proxy (nginx/Caddy) at 127.0.0.1:${panel_port} and let it terminate TLS.${plain}"
-            else
-                echo -e "${yellow}Panel will listen on all interfaces over plain HTTP. Make sure something else is terminating TLS in front of it.${plain}"
-            fi
-
-            systemctl restart x-ui > /dev/null 2>&1 || rc-service x-ui restart > /dev/null 2>&1
-            echo -e "${green}✓ SSL setup skipped.${plain}"
-            ;;
-        *)
-            echo -e "${red}Invalid option. Skipping SSL setup.${plain}"
-            SSL_HOST="${server_ip}"
-            ;;
-    esac
-}
-
-config_after_install() {
-    local existing_hasDefaultCredential=$(${xui_folder}/x-ui setting -show true | grep -Eo 'hasDefaultCredential: .+' | awk '{print $2}')
-    local existing_webBasePath=$(${xui_folder}/x-ui setting -show true | grep -Eo 'webBasePath: .+' | awk '{print $2}' | sed 's#^/##')
-    local existing_port=$(${xui_folder}/x-ui setting -show true | grep -Eo 'port: .+' | awk '{print $2}')
-    # Properly detect empty cert by checking if cert: line exists and has content after it
-    local existing_cert=$(${xui_folder}/x-ui setting -getCert true | grep 'cert:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
-    local URL_lists=(
-        "https://api4.ipify.org"
-        "https://ipv4.icanhazip.com"
-        "https://v4.api.ipinfo.io/ip"
-        "https://ipv4.myexternalip.com/raw"
-        "https://4.ident.me"
-        "https://check-host.net/ip"
-    )
-    local server_ip=""
-    for ip_address in "${URL_lists[@]}"; do
-        local response=$(curl -s -w "\n%{http_code}" --max-time 3 "${ip_address}" 2> /dev/null)
-        local http_code=$(echo "$response" | tail -n1)
-        local ip_result=$(echo "$response" | head -n-1 | tr -d '[:space:]"')
-        if [[ "${http_code}" == "200" && "${ip_result}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            server_ip="${ip_result}"
-            break
-        fi
-    done
-
-    if [[ -z "$server_ip" ]]; then
-        if [[ "$NONINTERACTIVE" == "1" ]]; then
-            # Panel binds 0.0.0.0 regardless; the IP is only used to compose the
-            # displayed access URL. Fall back to XUI_SERVER_IP or leave blank.
-            server_ip="${XUI_SERVER_IP:-}"
-        else
-            echo -e "${yellow}Could not auto-detect server IP from any provider.${plain}"
-            while [[ -z "$server_ip" ]]; do
-                read -rp "Please enter your server's public IPv4 address: " server_ip
-                server_ip="${server_ip// /}"
-                if [[ ! "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                    echo -e "${red}Invalid IPv4 address. Please try again.${plain}"
-                    server_ip=""
-                fi
-            done
-        fi
-    fi
-
-    if [[ ${#existing_webBasePath} -lt 4 ]]; then
-        if [[ "$existing_hasDefaultCredential" == "true" ]]; then
-            local config_webBasePath="${XUI_WEB_BASE_PATH:-$(gen_random_string 18)}"
-            local config_username="${XUI_USERNAME:-$(gen_random_string 10)}"
-            local config_password="${XUI_PASSWORD:-$(gen_random_string 10)}"
-            local config_port=""
-
-            local db_label="SQLite (/etc/x-ui/x-ui.db)"
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     Database Selection                    ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "  1) SQLite     (default — recommended for < 500 clients)"
-            echo -e "  2) PostgreSQL (recommended for high client counts / many nodes)"
-            if [[ "$NONINTERACTIVE" == "1" ]]; then
-                if [[ "${XUI_DB_TYPE:-sqlite}" == "postgres" ]]; then
-                    db_choice="2"
-                else
-                    db_choice="1"
-                fi
-            else
-                read -rp "Choose [1]: " db_choice
-                db_choice="${db_choice:-1}"
-            fi
-            if [[ "$db_choice" == "2" ]]; then
-                local xui_env_file
-                case "${release}" in
-                    ubuntu | debian | armbian)
-                        xui_env_file="/etc/default/x-ui"
-                        ;;
-                    arch | manjaro | parch | alpine)
-                        xui_env_file="/etc/conf.d/x-ui"
-                        ;;
-                    *)
-                        xui_env_file="/etc/sysconfig/x-ui"
-                        ;;
-                esac
-
-                local xui_dsn=""
-                local pg_mode=""
-                local pg_local_installed=0
-                while [[ -z "$xui_dsn" ]]; do
-                    if [[ "$NONINTERACTIVE" == "1" ]]; then
-                        if [[ -n "${XUI_DB_DSN:-}" ]]; then
-                            xui_dsn="${XUI_DB_DSN}"
-                            db_label="PostgreSQL (external)"
-                            break
-                        fi
-                        echo -e "${yellow}Installing PostgreSQL locally (non-interactive)...${plain}"
-                        local pg_cred_file
-                        pg_cred_file=$(mktemp 2> /dev/null) || pg_cred_file=$(mktemp -t x-ui-pg-creds.XXXXXXXX)
-                        if [[ -n "${pg_cred_file}" ]] && xui_dsn=$(PG_CRED_FILE="${pg_cred_file}" install_postgres_local); then
-                            pg_local_installed=1
-                            if [[ -r "${pg_cred_file}" ]]; then
-                                # shellcheck disable=SC1090
-                                source "${pg_cred_file}"
-                            fi
-                            rm -f "${pg_cred_file}"
-                            db_label="PostgreSQL (${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_DB})"
-                            break
-                        fi
-                        rm -f "${pg_cred_file}"
-                        echo -e "${red}PostgreSQL installation failed in non-interactive mode; aborting.${plain}"
-                        echo -e "${yellow}Set XUI_DB_DSN to use an existing server, or XUI_DB_TYPE=sqlite.${plain}"
-                        exit 1
-                    fi
-                    echo ""
-                    echo -e "  1) Install PostgreSQL locally and create a dedicated user/db (recommended)"
-                    echo -e "  2) Use an existing PostgreSQL server (enter DSN)"
-                    read -rp "Choose [1]: " pg_mode
-                    pg_mode="${pg_mode:-1}"
-                    if [[ "$pg_mode" == "2" ]]; then
-                        while [[ -z "$xui_dsn" ]]; do
-                            read -rp "Enter PostgreSQL DSN (postgres://user:pass@host:port/dbname?sslmode=disable): " xui_dsn
-                            xui_dsn="${xui_dsn// /}"
-                        done
-                        db_label="PostgreSQL (external)"
-                    else
-                        echo -e "${yellow}Installing PostgreSQL — this may take a moment...${plain}"
-                        local pg_cred_file
-                        pg_cred_file=$(mktemp 2> /dev/null) || pg_cred_file=$(mktemp -t x-ui-pg-creds.XXXXXXXX)
-                        if [[ -z "${pg_cred_file}" ]]; then
-                            echo -e "${red}Failed to create temporary credentials file.${plain}"
-                            xui_dsn=""
-                            continue
-                        fi
-                        if xui_dsn=$(PG_CRED_FILE="${pg_cred_file}" install_postgres_local); then
-                            pg_local_installed=1
-                            if [[ -r "${pg_cred_file}" ]]; then
-                                # shellcheck disable=SC1090
-                                source "${pg_cred_file}"
-                            fi
-                            rm -f "${pg_cred_file}"
-                            db_label="PostgreSQL (${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_DB})"
-                        else
-                            rm -f "${pg_cred_file}"
-                            echo ""
-                            echo -e "${red}PostgreSQL installation failed.${plain}"
-                            echo -e "  1) Retry local install"
-                            echo -e "  2) Enter an external DSN instead"
-                            echo -e "  3) Abort install"
-                            echo -e "  4) Fall back to SQLite"
-                            read -rp "Choose [1]: " pg_fail
-                            pg_fail="${pg_fail:-1}"
-                            case "$pg_fail" in
-                                2) pg_mode="2" ;;
-                                3)
-                                    echo -e "${red}Install aborted.${plain}"
-                                    exit 1
-                                    ;;
-                                4)
-                                    db_choice="1"
-                                    xui_dsn=""
-                                    break
-                                    ;;
-                                *) xui_dsn="" ;;
-                            esac
-                        fi
-                    fi
-                done
-                if [[ -n "$xui_dsn" ]]; then
-                    install -d -m 755 "$(dirname "$xui_env_file")"
-                    umask 077
-                    cat > "$xui_env_file" << EOF
-XUI_DB_TYPE=postgres
-XUI_DB_DSN=${xui_dsn}
-EOF
-                    chmod 600 "$xui_env_file"
-                    umask 022
-                    export XUI_DB_TYPE=postgres
-                    export XUI_DB_DSN="${xui_dsn}"
-                    ensure_pg_client || echo -e "${yellow}⚠ Could not install pg_dump/pg_restore. In-panel database backup/restore will be unavailable until you install the postgresql-client package.${plain}"
-                fi
-            fi
-
-            if [[ "$NONINTERACTIVE" == "1" ]]; then
-                if [[ -n "${XUI_PANEL_PORT:-}" ]]; then
-                    config_port="${XUI_PANEL_PORT}"
-                    echo -e "${yellow}Your Panel Port is: ${config_port}${plain}"
-                else
-                    config_port=$(shuf -i 1024-62000 -n 1)
-                    echo -e "${yellow}Generated random port: ${config_port}${plain}"
-                fi
-            else
-                read -rp "Would you like to customize the Panel Port settings? (If not, a random port will be applied) [y/n]: " config_confirm
-                if [[ "${config_confirm}" == "y" || "${config_confirm}" == "Y" ]]; then
-                    read -rp "Please set up the panel port: " config_port
-                    echo -e "${yellow}Your Panel Port is: ${config_port}${plain}"
-                else
-                    config_port=$(shuf -i 1024-62000 -n 1)
-                    echo -e "${yellow}Generated random port: ${config_port}${plain}"
-                fi
-            fi
-
-            ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}"
-
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     SSL Certificate Setup (RECOMMENDED)   ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}SSL is strongly recommended. Skip only if a reverse proxy${plain}"
-            echo -e "${yellow}or SSH tunnel handles TLS for you.${plain}"
-            echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-            echo ""
-
-            prompt_and_setup_ssl "${config_port}" "${config_webBasePath}" "${server_ip}"
-
-            # Retrieve the API token for display
-            local config_apiToken=$(${xui_folder}/x-ui setting -getApiToken true | grep -Eo 'apiToken: .+' | awk '{print $2}')
-
-            # Display final credentials and access information
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     Panel Installation Complete!         ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}Username:    ${config_username}${plain}"
-            echo -e "${green}Password:    ${config_password}${plain}"
-            echo -e "${green}Port:        ${config_port}${plain}"
-            echo -e "${green}WebBasePath: ${config_webBasePath}${plain}"
-            echo -e "${green}Database:    ${db_label}${plain}"
-            echo -e "${green}Access URL:  ${SSL_SCHEME}://${SSL_HOST}:${config_port}/${config_webBasePath}${plain}"
-            echo -e "${green}API Token:   ${config_apiToken}${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}⚠ IMPORTANT: Save these credentials securely!${plain}"
-            if [[ "$SSL_SCHEME" == "https" ]]; then
-                echo -e "${yellow}⚠ SSL Certificate: Enabled and configured${plain}"
-            else
-                echo -e "${yellow}⚠ SSL Certificate: Skipped — panel is HTTP-only. Use a reverse proxy or SSH tunnel.${plain}"
-            fi
-
-            if [[ "$db_choice" == "2" ]]; then
-                echo ""
-                echo -e "${green}PostgreSQL backup & restore is built into the panel:${plain}"
-                echo -e "  ${blue}${SSL_SCHEME}://${SSL_HOST}:${config_port}/${config_webBasePath}${plain} → Backup & Restore"
-                echo -e "${yellow}  Back Up downloads a pg_dump .dump file; Restore reloads it via pg_restore.${plain}"
-            fi
-
-            if [[ "$db_choice" == "2" && "$pg_local_installed" == "1" ]]; then
-                echo ""
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${green}     PostgreSQL Credentials               ${plain}"
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${green}DB Name:    ${PG_DB}${plain}"
-                echo -e "${green}Username:   ${PG_USER}${plain}"
-                echo -e "${green}Password:   ${PG_PASS}${plain}"
-                echo -e "${green}Host:       ${PG_HOST}${plain}"
-                echo -e "${green}Port:       ${PG_PORT}${plain}"
-                echo -e "${green}DSN:        ${xui_dsn}${plain}"
-                echo -e "${green}Env file:   ${xui_env_file}${plain}"
-                echo -e "${green}-------------------------------------------${plain}"
-                echo -e "${green}Connect from this server:${plain}"
-                echo -e "  ${blue}sudo -u postgres psql -d ${PG_DB}${plain}      (as the postgres superuser)"
-                echo -e "  ${blue}PGPASSWORD='${PG_PASS}' psql -h ${PG_HOST} -p ${PG_PORT} -U ${PG_USER} -d ${PG_DB}${plain}"
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${yellow}⚠ The panel reads these credentials from ${xui_env_file}.${plain}"
-                echo -e "${yellow}⚠ Save the password — it is not stored anywhere else in plain text.${plain}"
-                unset PG_USER PG_PASS PG_HOST PG_PORT PG_DB
-            fi
-
-            # Persist a machine-parseable credentials file for cloud-init / MOTD.
-            : "${SSL_SCHEME:=https}"
-            : "${SSL_HOST:=${server_ip}}"
-            local db_type_out="sqlite"
-            [[ "$db_choice" == "2" ]] && db_type_out="postgres"
-            write_install_result "${config_username}" "${config_password}" "${config_port}" \
-                "${config_webBasePath}" "${SSL_SCHEME}" "${SSL_HOST}" "${config_apiToken}" "${db_type_out}"
-        else
-            local config_webBasePath=$(gen_random_string 18)
-            echo -e "${yellow}WebBasePath is missing or too short. Generating a new one...${plain}"
-            ${xui_folder}/x-ui setting -webBasePath "${config_webBasePath}"
-            echo -e "${green}New WebBasePath: ${config_webBasePath}${plain}"
-
-            # If the panel is already installed but no certificate is configured, prompt for SSL now
-            if [[ -z "${existing_cert}" ]]; then
-                echo ""
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${green}     SSL Certificate Setup (RECOMMENDED)   ${plain}"
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-                echo ""
-                prompt_and_setup_ssl "${existing_port}" "${config_webBasePath}" "${server_ip}"
-                echo -e "${green}Access URL:  ${SSL_SCHEME}://${SSL_HOST}:${existing_port}/${config_webBasePath}${plain}"
-            else
-                # If a cert already exists, just show the access URL
-                echo -e "${green}Access URL: https://${server_ip}:${existing_port}/${config_webBasePath}${plain}"
-            fi
-        fi
-    else
-        if [[ "$existing_hasDefaultCredential" == "true" ]]; then
-            local config_username="${XUI_USERNAME:-$(gen_random_string 10)}"
-            local config_password="${XUI_PASSWORD:-$(gen_random_string 10)}"
-
-            echo -e "${yellow}Default credentials detected. Security update required...${plain}"
-            ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}"
-            echo -e "Generated new random login credentials:"
-            echo -e "###############################################"
-            echo -e "${green}Username: ${config_username}${plain}"
-            echo -e "${green}Password: ${config_password}${plain}"
-            echo -e "###############################################"
-
-            # Persist a machine-parseable credentials file for cloud-init / MOTD.
-            local config_apiToken
-            config_apiToken=$(${xui_folder}/x-ui setting -getApiToken true | grep -Eo 'apiToken: .+' | awk '{print $2}')
-            : "${SSL_SCHEME:=https}"
-            : "${SSL_HOST:=${server_ip}}"
-            write_install_result "${config_username}" "${config_password}" "${existing_port}" \
-                "${existing_webBasePath}" "${SSL_SCHEME}" "${SSL_HOST}" "${config_apiToken}" "${XUI_DB_TYPE:-sqlite}"
-        else
-            echo -e "${green}Username, Password, and WebBasePath are properly set.${plain}"
-        fi
-
-        # Existing install: if no cert configured, prompt user for SSL setup
-        # Properly detect empty cert by checking if cert: line exists and has content after it
-        existing_cert=$(${xui_folder}/x-ui setting -getCert true | grep 'cert:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
-        if [[ -z "$existing_cert" ]]; then
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     SSL Certificate Setup (RECOMMENDED)   ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-            echo ""
-            prompt_and_setup_ssl "${existing_port}" "${existing_webBasePath}" "${server_ip}"
-            echo -e "${green}Access URL:  ${SSL_SCHEME}://${SSL_HOST}:${existing_port}/${existing_webBasePath}${plain}"
-        else
-            echo -e "${green}SSL certificate already configured. No action needed.${plain}"
-        fi
-    fi
-
-    ${xui_folder}/x-ui migrate
-}
-
-# setup_fail2ban auto-installs and configures fail2ban for the IP Limit feature
-# by invoking the freshly installed x-ui CLI. IP Limit is load-bearing on
-# fail2ban (without it the panel disables the limitIp field and zeroes existing
-# limits), so a fresh install should make it work out of the box, just like the
-# Docker image already does. Non-fatal by design: a fail2ban failure must never
-# abort the panel install.
-setup_fail2ban() {
-    if [[ -n "${XUI_ENABLE_FAIL2BAN+x}" && "${XUI_ENABLE_FAIL2BAN}" != "true" ]]; then
-        echo -e "${yellow}XUI_ENABLE_FAIL2BAN=${XUI_ENABLE_FAIL2BAN}, skipping Fail2ban auto-setup.${plain}"
-        return 0
-    fi
-
-    if [[ ! -x /usr/bin/x-ui ]]; then
-        echo -e "${yellow}x-ui CLI not found; skipping Fail2ban auto-setup.${plain}"
-        return 0
-    fi
-
-    echo -e "${green}Setting up Fail2ban for the IP Limit feature...${plain}"
-    if /usr/bin/x-ui setup-fail2ban; then
-        echo -e "${green}Fail2ban setup complete.${plain}"
-    else
-        echo -e "${yellow}Fail2ban setup did not finish; IP Limit stays disabled until you run 'x-ui' and open the IP Limit menu. Continuing.${plain}"
-    fi
-    return 0
-}
-
-# Lands a systemd unit file at ${xui_service}/x-ui.service via a temp file +
-# atomic mv, so a failed cp/curl or an interrupted mv never leaves a
-# truncated unit file at the live path -- systemd would then fail to parse
-# it on the next daemon-reload/start. Same pattern already used for
-# /usr/bin/x-ui elsewhere in this script. source_is_url picks cp (from a
-# file already extracted from the release tarball) vs curl (GitHub fallback).
-_install_xui_service_unit() {
-    local source="$1"
-    local source_is_url="$2"
-    local dest="${xui_service}/x-ui.service"
-    local temp_file="${dest}.tmp.$$"
-
-    rm -f "$temp_file"
-    if [[ "$source_is_url" == "true" ]]; then
-        curl -fLRo "$temp_file" "$source" > /dev/null 2>&1
-    else
-        cp -f "$source" "$temp_file" > /dev/null 2>&1
-    fi
-    if [[ $? -ne 0 ]]; then
-        rm -f "$temp_file"
-        return 1
-    fi
-    if [[ ! -s "$temp_file" ]]; then
-        rm -f "$temp_file"
-        return 1
-    fi
-    mv -f "$temp_file" "$dest"
-    if [[ $? -ne 0 ]]; then
-        rm -f "$temp_file"
-        return 1
-    fi
-    return 0
-}
-
-# resolve_latest_tag prints the latest stable release tag. It prefers the web
-# releases/latest redirect, which is not subject to the unauthenticated API's
-# 60 req/h-per-IP limit that trips shared CI/CGNAT addresses (the install then
-# fails with "Failed to fetch x-ui version"), and falls back to the API.
-resolve_latest_tag() {
-    local url tag
-    url=$(curl -sSLI -o /dev/null -w '%{url_effective}' --retry 5 --retry-delay 3 --connect-timeout 15 --max-time 60 "https://github.com/MHSanaei/3x-ui/releases/latest" 2>/dev/null)
-    tag=${url##*/tag/}
-    if [[ "$tag" != "$url" && -n "$tag" && "$tag" != "latest" ]]; then
-        echo "$tag"
-        return 0
-    fi
-    curl -Ls --retry 5 --retry-delay 3 --connect-timeout 15 --max-time 60 "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
-}
-
-install_x-ui() {
-    cd ${xui_folder%/x-ui}/
-
-    # Download resources
-    if [ $# == 0 ]; then
-        tag_version=$(resolve_latest_tag)
-        if [[ ! -n "$tag_version" ]]; then
-            echo -e "${red}Failed to fetch x-ui version, it may be due to GitHub API restrictions, please try it later${plain}"
-            exit 1
-        fi
-        echo -e "Got x-ui latest version: ${tag_version}, beginning the installation..."
-        curl -fLR --retry 5 --retry-delay 3 --connect-timeout 15 --speed-limit 1 --speed-time 300 -o ${xui_folder}-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Downloading x-ui failed, please be sure that your server can access GitHub ${plain}"
-            exit 1
-        fi
-        if [[ ! -s ${xui_folder}-linux-$(arch).tar.gz ]]; then
-            rm ${xui_folder}-linux-$(arch).tar.gz -f
-            echo -e "${red}Downloaded x-ui release archive is empty${plain}"
-            exit 1
-        fi
-    else
-        tag_version=$1
-        # The rolling dev channel ships under a fixed, non-semver tag that is
-        # force-moved to the latest main commit on every push. Accept `dev` as a
-        # convenient alias and skip the numeric floor check for it.
-        if [[ "$tag_version" == "dev" || "$tag_version" == "dev-latest" ]]; then
-            tag_version="dev-latest"
-            echo -e "${yellow}Installing the rolling dev build (tag: dev-latest). This is a per-commit pre-release, not a stable version.${plain}"
-        else
-            tag_version_numeric=${tag_version#v}
-            min_version="2.3.5"
-
-            if [[ "$(printf '%s\n' "$min_version" "$tag_version_numeric" | sort -V | head -n1)" != "$min_version" ]]; then
-                echo -e "${red}Please use a newer version (at least v2.3.5). Exiting installation.${plain}"
-                exit 1
-            fi
-        fi
-
-        url="https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz"
-        echo -e "Beginning to install x-ui ${tag_version}"
-        curl -fLR --retry 5 --retry-delay 3 --connect-timeout 15 --speed-limit 1 --speed-time 300 -o ${xui_folder}-linux-$(arch).tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Download x-ui ${tag_version} failed, please check if the version exists ${plain}"
-            exit 1
-        fi
-        if [[ ! -s ${xui_folder}-linux-$(arch).tar.gz ]]; then
-            rm ${xui_folder}-linux-$(arch).tar.gz -f
-            echo -e "${red}Downloaded x-ui release archive is empty${plain}"
-            exit 1
-        fi
-    fi
-    local xui_script_temp="/usr/bin/x-ui-temp.$$"
-    rm -f "${xui_script_temp}"
-    curl -fLRo "${xui_script_temp}" https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
-    if [[ $? -ne 0 ]]; then
-        rm -f "${xui_script_temp}"
-        echo -e "${red}Failed to download x-ui.sh${plain}"
-        exit 1
-    fi
-    if [[ ! -s "${xui_script_temp}" ]]; then
-        rm -f "${xui_script_temp}"
-        echo -e "${red}Downloaded x-ui.sh is empty${plain}"
-        exit 1
-    fi
-
-    # Stop x-ui service and remove old resources
-    local custom_bin_backup=""
-    if [[ -e ${xui_folder}/ ]]; then
-        if [[ $release == "alpine" ]]; then
-            rc-service x-ui stop
-        else
-            systemctl stop x-ui
-        fi
-        # Kill any leftover mtg (MTProto) sidecars. x-ui runs them outside its own
-        # lifecycle, so on Linux a stale one can survive the stop and keep holding
-        # an inbound port with an outdated secret, silently breaking new clients.
-        # The freshly installed panel respawns a clean mtg per inbound on start.
-        pkill -f 'mtg-linux-[^ ]* run ' > /dev/null 2>&1 || true
-
-        # bin/ is about to be wiped wholesale by the tar extraction below. The
-        # release only ships known assets (xray/mtg binaries, the bundled
-        # geoip*/geosite*.dat sets) -- anything else in bin/ was placed there
-        # by the admin (e.g. a hand-added custom geoip/geosite file referenced
-        # from a routing rule via "ext:<file>:<code>") and would otherwise be
-        # silently deleted on every update, breaking Xray at next start with
-        # "failed to open <file>: no such file or directory" for any routing
-        # rule that references it. Moved aside rather than copied: a rename
-        # on the same filesystem is atomic (no truncated file if disk space
-        # runs out mid-copy, unlike `cp`) and keeps the snapshot under
-        # /usr/local rather than a separate, possibly small/tmpfs $TMPDIR.
-        if [[ -d "${xui_folder}/bin" ]]; then
-            custom_bin_backup="${xui_folder%/x-ui}/x-ui-bin-backup.$$"
-            rm -rf "${custom_bin_backup}"
-            if ! mv "${xui_folder}/bin" "${custom_bin_backup}"; then
-                custom_bin_backup=""
-                echo -e "${yellow}Could not back up bin/ -- custom files there will not be preserved across this update${plain}"
-            fi
-        fi
-        # Sole cleanup path for the backup from here on -- covers both the
-        # two `exit 1`s below (extraction/binary-missing failures) and an
-        # interrupted update (Ctrl-C, signal) before the restore runs.
-        # Cleared once the restore below finishes normally.
-        trap '[[ -n "${custom_bin_backup}" ]] && rm -rf "${custom_bin_backup}"' EXIT INT TERM
-        rm ${xui_folder}/ -rf
-    fi
-
-    # Extract resources and set permissions
-    tar zxvf x-ui-linux-$(arch).tar.gz
-    if [[ $? -ne 0 ]]; then
-        rm x-ui-linux-$(arch).tar.gz -f
-        rm -f "${xui_script_temp}"
-        echo -e "${red}Failed to extract the x-ui release archive -- the previous installation has already been removed, so the panel will not start until this is fixed; try running the installer again${plain}"
-        exit 1
-    fi
-    rm x-ui-linux-$(arch).tar.gz -f
-
-    cd x-ui
-    if [[ $? -ne 0 || ! -s x-ui ]]; then
-        rm -f "${xui_script_temp}"
-        echo -e "${red}Extracted x-ui archive is missing the x-ui binary -- the previous installation has already been removed, so the panel will not start until this is fixed; try running the installer again${plain}"
-        exit 1
-    fi
-    chmod +x x-ui
-    chmod +x x-ui.sh
-
-    # Check the system's architecture and rename the file accordingly.
-    # The panel binary maps GOARCH=arm to "arm32" (internal/xray/process.go),
-    # so the Xray binary must be named xray-linux-arm32; mtg keeps plain "arm".
-    if [[ $(arch) == "armv5" || $(arch) == "armv6" || $(arch) == "armv7" ]]; then
-        mv bin/xray-linux-$(arch) bin/xray-linux-arm32
-        chmod +x bin/xray-linux-arm32
-        if [[ -f bin/mtg-linux-$(arch) ]]; then
-            mv bin/mtg-linux-$(arch) bin/mtg-linux-arm
-            chmod +x bin/mtg-linux-arm
-        fi
-    fi
-    chmod +x x-ui bin/xray-linux-$(arch)
-    if [[ -f bin/mtg-linux-arm ]]; then
-        chmod +x bin/mtg-linux-arm
-    elif [[ -f bin/mtg-linux-$(arch) ]]; then
-        chmod +x bin/mtg-linux-$(arch)
-    fi
-
-    # Restore anything from the old bin/ that the fresh release doesn't ship
-    # (custom geoip/geosite files, or anything else an admin hand-placed
-    # there) -- never overwrites a same-named file the new release provides,
-    # so bundled assets (geoip.dat, geoip_RU.dat, ...) still get the fresh
-    # per-release copy. Runs after the arch-rename above so xray-linux-arm32/
-    # mtg-linux-arm already exist under their final names there and aren't
-    # mistaken for custom files needing a restore. Skips paths the panel
-    # itself regenerates at runtime (config.json, mtproto/*.toml -- see
-    # internal/xray/process.go, internal/mtproto/manager.go): those aren't
-    # admin-placed, and restoring a stale one only resurrects dead state (an
-    # orphaned mtg config for a since-deleted inbound) or the wrong
-    # directory permissions.
-    if [[ -n "${custom_bin_backup}" ]]; then
-        local restored_custom_bin=()
-        while IFS= read -r -d '' f; do
-            local rel="${f#"${custom_bin_backup}"/}"
-            case "${rel}" in
-                config.json | mtproto | mtproto/*) continue ;;
-            esac
-            if [[ ! -e "bin/${rel}" ]]; then
-                mkdir -p "bin/$(dirname "${rel}")"
-                cp -a "${f}" "bin/${rel}"
-                restored_custom_bin+=("${rel}")
-            fi
-        done < <(find "${custom_bin_backup}" \( -type f -o -type l \) -print0)
-        rm -rf "${custom_bin_backup}"
-        custom_bin_backup=""
-        if [[ ${#restored_custom_bin[@]} -gt 0 ]]; then
-            echo -e "${green}Restored custom file(s) in bin/ not shipped by this release: ${restored_custom_bin[*]}${plain}"
-        fi
-    fi
-    trap - EXIT INT TERM
-
-    # Update x-ui cli and se set permission
-    mv -f "${xui_script_temp}" /usr/bin/x-ui
-    if [[ $? -ne 0 ]]; then
-        rm -f "${xui_script_temp}"
-        echo -e "${red}Failed to install x-ui.sh${plain}"
-        exit 1
-    fi
-    chmod +x /usr/bin/x-ui
-    mkdir -p /var/log/x-ui
-    config_after_install
-
-    # Etckeeper compatibility
-    if [ -d "/etc/.git" ]; then
-        if [ -f "/etc/.gitignore" ]; then
-            if ! grep -q "x-ui/x-ui.db" "/etc/.gitignore"; then
-                echo "" >> "/etc/.gitignore"
-                echo "x-ui/x-ui.db" >> "/etc/.gitignore"
-                echo -e "${green}Added x-ui.db to /etc/.gitignore for etckeeper${plain}"
-            fi
-        else
-            echo "x-ui/x-ui.db" > "/etc/.gitignore"
-            echo -e "${green}Created /etc/.gitignore and added x-ui.db for etckeeper${plain}"
-        fi
-    fi
-
-    if [[ $release == "alpine" ]]; then
-        xui_rc_temp="/etc/init.d/x-ui.tmp.$$"
-        rm -f "${xui_rc_temp}"
-        curl -fLRo "${xui_rc_temp}" https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.rc
-        if [[ $? -ne 0 ]]; then
-            rm -f "${xui_rc_temp}"
-            echo -e "${red}Failed to download x-ui.rc${plain}"
-            exit 1
-        fi
-        if [[ ! -s "${xui_rc_temp}" ]]; then
-            rm -f "${xui_rc_temp}"
-            echo -e "${red}Downloaded x-ui.rc is empty${plain}"
-            exit 1
-        fi
-        mv -f "${xui_rc_temp}" /etc/init.d/x-ui
-        if [[ $? -ne 0 ]]; then
-            rm -f "${xui_rc_temp}"
-            echo -e "${red}Failed to install x-ui.rc${plain}"
-            exit 1
-        fi
-        chmod +x /etc/init.d/x-ui
-        rc-update add x-ui
-        rc-service x-ui start
-    else
-        # Install systemd service file
-        service_installed=false
-
-        if [ -f "x-ui.service" ]; then
-            echo -e "${green}Found x-ui.service in extracted files, installing...${plain}"
-            if _install_xui_service_unit "x-ui.service" "false"; then
-                service_installed=true
-            fi
-        fi
-
-        if [ "$service_installed" = false ]; then
-            case "${release}" in
-                ubuntu | debian | armbian)
-                    if [ -f "x-ui.service.debian" ]; then
-                        echo -e "${green}Found x-ui.service.debian in extracted files, installing...${plain}"
-                        if _install_xui_service_unit "x-ui.service.debian" "false"; then
-                            service_installed=true
-                        fi
-                    fi
-                    ;;
-                arch | manjaro | parch)
-                    if [ -f "x-ui.service.arch" ]; then
-                        echo -e "${green}Found x-ui.service.arch in extracted files, installing...${plain}"
-                        if _install_xui_service_unit "x-ui.service.arch" "false"; then
-                            service_installed=true
-                        fi
-                    fi
-                    ;;
-                *)
-                    if [ -f "x-ui.service.rhel" ]; then
-                        echo -e "${green}Found x-ui.service.rhel in extracted files, installing...${plain}"
-                        if _install_xui_service_unit "x-ui.service.rhel" "false"; then
-                            service_installed=true
-                        fi
-                    fi
-                    ;;
-            esac
-        fi
-
-        # If service file not found in tar.gz, download from GitHub
-        if [ "$service_installed" = false ]; then
-            echo -e "${yellow}Service files not found in tar.gz, downloading from GitHub...${plain}"
-            case "${release}" in
-                ubuntu | debian | armbian)
-                    service_unit_url="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.debian"
-                    ;;
-                arch | manjaro | parch)
-                    service_unit_url="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.arch"
-                    ;;
-                *)
-                    service_unit_url="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.rhel"
-                    ;;
-            esac
-
-            if ! _install_xui_service_unit "$service_unit_url" "true"; then
-                echo -e "${red}Failed to install x-ui.service from GitHub${plain}"
-                exit 1
-            fi
-            service_installed=true
-        fi
-
-        if [ "$service_installed" = true ]; then
-            echo -e "${green}Setting up systemd unit...${plain}"
-            chown root:root ${xui_service}/x-ui.service > /dev/null 2>&1
-            chmod 644 ${xui_service}/x-ui.service > /dev/null 2>&1
-            systemctl daemon-reload
-            systemctl enable x-ui
-            systemctl start x-ui
-        else
-            echo -e "${red}Failed to install x-ui.service file${plain}"
-            exit 1
-        fi
-    fi
-
-    # IP Limit relies on fail2ban; install + configure it now so the feature
-    # works out of the box (no-op when XUI_ENABLE_FAIL2BAN=false). Never fatal.
-    setup_fail2ban
-
-    echo -e "${green}x-ui ${tag_version}${plain} installation finished, it is running now..."
-    echo -e ""
-    echo -e "┌───────────────────────────────────────────────────────┐
-│  ${blue}x-ui control menu usages (subcommands):${plain}              │
-│                                                       │
-│  ${blue}x-ui${plain}              - Admin Management Script          │
-│  ${blue}x-ui start${plain}        - Start                            │
-│  ${blue}x-ui stop${plain}         - Stop                             │
-│  ${blue}x-ui restart${plain}      - Restart                          │
-│  ${blue}x-ui status${plain}       - Current Status                   │
-│  ${blue}x-ui settings${plain}     - Current Settings                 │
-│  ${blue}x-ui enable${plain}       - Enable Autostart on OS Startup   │
-│  ${blue}x-ui disable${plain}      - Disable Autostart on OS Startup  │
-│  ${blue}x-ui log${plain}          - Check logs                       │
-│  ${blue}x-ui banlog${plain}       - Check Fail2ban ban logs          │
-│  ${blue}x-ui update${plain}       - Update                           │
-│  ${blue}x-ui legacy${plain}       - Legacy version                   │
-│  ${blue}x-ui install${plain}      - Install                          │
-│  ${blue}x-ui uninstall${plain}    - Uninstall                        │
-└───────────────────────────────────────────────────────┘"
-}
-
-echo -e "${green}Running...${plain}"
-install_base
-install_x-ui $1
+main "$@"
